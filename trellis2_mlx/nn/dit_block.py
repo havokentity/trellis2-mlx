@@ -40,11 +40,11 @@ class DiTBlock(nn.Module):
 
     def __call__(
         self,
-        x: "mx.array",
-        coords: "mx.array",
-        image_kv: "mx.array",
-        modulation: "mx.array",
-    ) -> "mx.array":
+        x: mx.array,
+        coords: mx.array,
+        image_kv: mx.array,
+        modulation: mx.array,
+    ) -> mx.array:
         """Apply the block.
 
         Parameters

@@ -15,9 +15,9 @@ if TYPE_CHECKING:
 
 
 def export_glb(
-    vertices: "mx.array",
-    faces: "mx.array",
-    materials: "mx.array",
+    vertices: mx.array,
+    faces: mx.array,
+    materials: mx.array,
     out_path: str | Path,
 ) -> Path:
     """Author a GLB file with PBR materials at ``out_path``.

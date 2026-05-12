@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from trellis2_mlx.ovoxel.data import OVoxel
 
 
-def bake_materials(ovoxel: "OVoxel", query_points: "mx.array") -> "mx.array":
+def bake_materials(ovoxel: OVoxel, query_points: mx.array) -> mx.array:
     """Trilinearly sample ``(c, m, r, α)`` at ``query_points``.
 
     Parameters

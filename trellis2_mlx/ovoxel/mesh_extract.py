@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from trellis2_mlx.ovoxel.data import OVoxel
 
 
-def extract_mesh(ovoxel: "OVoxel") -> tuple["mx.array", "mx.array"]:
+def extract_mesh(ovoxel: OVoxel) -> tuple[mx.array, mx.array]:
     """Return ``(vertices, faces)`` for the input O-Voxel grid.
 
     Vertices have shape ``[L, 3]`` (one dual vertex per active voxel, in unit

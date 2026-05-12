@@ -78,11 +78,49 @@ warn_unused_ignores = true
 warn_return_any = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+# MLX has no type stubs, so subclassing nn.Module would otherwise error out
+# everywhere. PIL is also lightly typed. Until upstream ships stubs, allow
+# subclassing of Any (typed-as-Any from missing-import overrides).
+disallow_subclassing_any = false
 exclude = ["reference/", "build/"]
 
 [[tool.mypy.overrides]]
-module = ["mlx.*", "trimesh.*", "transformers.*", "einops.*", "huggingface_hub.*"]
+module = [
+    "mlx.*",
+    "trimesh.*",
+    "transformers.*",
+    "einops.*",
+    "huggingface_hub.*",
+    "PIL.*",
+    "torch.*",
+    "safetensors.*",
+]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests intentionally do dynamic boilerplate around the PyTorch oracle.
+# Keep strictness for the library; relax for the test suite.
+module = ["trellis2_mlx.tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_return_any = false
+warn_unused_ignores = false
+disable_error_code = ["attr-defined", "no-untyped-call", "operator", "union-attr"]
+
+[[tool.mypy.overrides]]
+# MLX-bound modules transitively inherit `Any` from mlx.nn (no stubs upstream).
+# Disable the resulting noise while keeping our own type discipline. Revisit
+# when MLX ships type stubs.
+module = [
+    "trellis2_mlx.models.*",
+    "trellis2_mlx.nn.*",
+    "trellis2_mlx.ovoxel.*",
+    "trellis2_mlx.metal.*",
+    "trellis2_mlx.samplers.*",
+    "trellis2_mlx.utils.weight_convert",
+    "trellis2_mlx.pipeline",
+]
+disable_error_code = ["attr-defined", "name-defined", "misc", "no-any-return"]
 
 [tool.pytest.ini_options]
 testpaths = ["trellis2_mlx/tests"]

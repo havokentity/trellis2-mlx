@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import mlx.nn as nn
 
 if TYPE_CHECKING:
-    import mlx.core as mx
+    pass
 
 
 class DiTStack(nn.Module):

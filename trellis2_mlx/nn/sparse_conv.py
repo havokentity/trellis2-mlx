@@ -44,7 +44,7 @@ class SubMConv3(nn.Module):
         self.use_bias = bias
         raise NotImplementedError("SubMConv3 lands in Phase 1 step 5")
 
-    def __call__(self, x: "mx.array", neighbor_table: "mx.array") -> "mx.array":
+    def __call__(self, x: mx.array, neighbor_table: mx.array) -> mx.array:
         """Apply the convolution.
 
         Parameters

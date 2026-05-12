@@ -30,11 +30,11 @@ class AdaLNSingle(nn.Module):
         self.dim = dim
         raise NotImplementedError("AdaLNSingle lands with the DiT block in Phase 1 step 8")
 
-    def __call__(self, t_emb: "mx.array") -> "mx.array":
+    def __call__(self, t_emb: mx.array) -> mx.array:
         """Predict shared modulation parameters from timestep embedding ``t_emb``."""
         raise NotImplementedError
 
 
-def modulate(x: "mx.array", shift: "mx.array", scale: "mx.array") -> "mx.array":
+def modulate(x: mx.array, shift: mx.array, scale: mx.array) -> mx.array:
     """Apply ``(1 + scale) * x + shift`` — the AdaLN-single inner op (spec §5.8)."""
     return (1.0 + scale) * x + shift

@@ -35,10 +35,10 @@ class ResEnc(nn.Module):
 
     def __call__(
         self,
-        x_fine: "mx.array",
-        coords_fine: "mx.array",
-        coords_coarse: "mx.array",
-    ) -> "mx.array":
+        x_fine: mx.array,
+        coords_fine: mx.array,
+        coords_coarse: mx.array,
+    ) -> mx.array:
         raise NotImplementedError
 
 
@@ -59,10 +59,10 @@ class ResDec(nn.Module):
 
     def __call__(
         self,
-        x_coarse: "mx.array",
-        coords_coarse: "mx.array",
-        coords_fine: "mx.array",
-    ) -> "mx.array":
+        x_coarse: mx.array,
+        coords_coarse: mx.array,
+        coords_fine: mx.array,
+    ) -> mx.array:
         raise NotImplementedError
 
 
@@ -79,6 +79,6 @@ class EarlyPruningHead(nn.Module):
         self.in_channels = in_channels
         raise NotImplementedError
 
-    def __call__(self, x: "mx.array") -> "mx.array":
+    def __call__(self, x: mx.array) -> mx.array:
         """Return ``[L_coarse, 8]`` logits/probabilities over child survival."""
         raise NotImplementedError

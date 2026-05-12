@@ -46,9 +46,9 @@ class SCVAEShapeDecoder(nn.Module):
 
     def __call__(
         self,
-        z_shape: "mx.array",
-        active_coords_coarse: "mx.array",
-    ) -> "OVoxel":
+        z_shape: mx.array,
+        active_coords_coarse: mx.array,
+    ) -> OVoxel:
         """Decode a coarse-grid shape latent into an O-Voxel with shape fields."""
         raise NotImplementedError
 
@@ -66,9 +66,9 @@ class SCVAEMaterialDecoder(nn.Module):
 
     def __call__(
         self,
-        z_material: "mx.array",
-        shape_ovoxel: "OVoxel",
-    ) -> "OVoxel":
+        z_material: mx.array,
+        shape_ovoxel: OVoxel,
+    ) -> OVoxel:
         """Decode material latents into an O-Voxel; returns the input
         ``shape_ovoxel`` augmented with ``c, m, r, α`` (same active set)."""
         raise NotImplementedError

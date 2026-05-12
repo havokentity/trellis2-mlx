@@ -33,6 +33,11 @@ and the spec disagree, the spec wins.
 ## Code style
 
 - Type-hint everything. `mypy --strict` is the bar.
+  - MLX upstream ships no type stubs, so `mlx.nn.Module` / `mlx.nn.Linear` /
+    `mlx.fast.*` all resolve to `Any`. `pyproject.toml` disables
+    ``attr-defined / name-defined / misc / no-any-return`` for the
+    MLX-bound submodules (``trellis2_mlx.models.*``, ``trellis2_mlx.nn.*``,
+    etc.). Revisit when MLX ships stubs. All *non-MLX* code stays strict.
 - Docstring every public function/class. Reference the spec section the code
   implements (e.g. `# Implements PHASE0_SPEC.md §5.2`).
 - Conventional commit prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`,

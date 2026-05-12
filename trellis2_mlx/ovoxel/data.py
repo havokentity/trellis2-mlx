@@ -46,18 +46,18 @@ class OVoxel:
         Grid resolution ``N`` (typically 512 / 1024 / 1536).
     """
 
-    coords: "mx.array"
-    v: "mx.array"
-    delta: "mx.array"
-    gamma: "mx.array"
-    c: "mx.array"
-    m: "mx.array"
-    r: "mx.array"
-    alpha: "mx.array"
+    coords: mx.array
+    v: mx.array
+    delta: mx.array
+    gamma: mx.array
+    c: mx.array
+    m: mx.array
+    r: mx.array
+    alpha: mx.array
     resolution: int
 
 
-def build_spatial_hash(coords: "mx.array") -> "mx.array":
+def build_spatial_hash(coords: mx.array) -> mx.array:
     """Construct a parallel open-addressing hash table over voxel coords.
 
     See ``PHASE0_SPEC.md §3.3`` and ``§5.3``. The GPU implementation lives in
@@ -67,7 +67,7 @@ def build_spatial_hash(coords: "mx.array") -> "mx.array":
     raise NotImplementedError
 
 
-def build_neighbor_table(coords: "mx.array") -> "mx.array":
+def build_neighbor_table(coords: mx.array) -> mx.array:
     """Build the ``[L, 27]`` int32 neighbor table for submanifold sparse conv.
 
     See ``PHASE0_SPEC.md §3.3``. Each row of the output table maps a voxel to
@@ -77,6 +77,6 @@ def build_neighbor_table(coords: "mx.array") -> "mx.array":
     raise NotImplementedError
 
 
-def child_to_parent(coords: "mx.array") -> "mx.array":
+def child_to_parent(coords: mx.array) -> mx.array:
     """Map fine voxels to coarse parents (used by SC-VAE down/up). See spec §3.3."""
     raise NotImplementedError

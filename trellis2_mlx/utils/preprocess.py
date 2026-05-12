@@ -14,12 +14,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import mlx.core as mx
     from PIL.Image import Image
 
-    import mlx.core as mx
 
-
-def remove_background(image: "Image") -> "Image":
+def remove_background(image: Image) -> Image:
     """Run RMBG-2.0 (or equivalent) and return an RGBA image with alpha mask.
 
     See spec §8 Q8 for the exact upstream version + preprocessing.
@@ -27,7 +26,7 @@ def remove_background(image: "Image") -> "Image":
     raise NotImplementedError("RMBG wrapper lands in Phase 1 step 3")
 
 
-def preprocess_for_dinov3(image: "Image", *, resolution: int = 224) -> "mx.array":
+def preprocess_for_dinov3(image: Image, *, resolution: int = 224) -> mx.array:
     """Center-crop, resize, and normalize for DINOv3-L input.
 
     Default resolution is 224; some TRELLIS pipelines use 518 (DINOv2-style) —

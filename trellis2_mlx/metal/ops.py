@@ -25,33 +25,33 @@ KERNELS_DIR = Path(__file__).parent / "kernels"
 # ── Forward-only ops ────────────────────────────────────────────────────────
 
 
-def neighbor_build(coords: "mx.array") -> "mx.array":
+def neighbor_build(coords: mx.array) -> mx.array:
     """Build a ``[L, 27]`` int32 neighbor table. See spec §5.3."""
     raise NotImplementedError
 
 
-def prefix_sum(mask: "mx.array") -> "mx.array":
+def prefix_sum(mask: mx.array) -> mx.array:
     """Exclusive parallel prefix-sum over a flat mask; used for compaction. See spec §5.5."""
     raise NotImplementedError
 
 
 def mesh_extract(
-    coords: "mx.array",
-    v: "mx.array",
-    delta: "mx.array",
-    gamma: "mx.array",
+    coords: mx.array,
+    v: mx.array,
+    delta: mx.array,
+    gamma: mx.array,
     resolution: int,
-) -> tuple["mx.array", "mx.array"]:
+) -> tuple[mx.array, mx.array]:
     """Flexible Dual Grid mesh extraction. See spec §5.6."""
     raise NotImplementedError
 
 
 def trilinear_bake(
-    coords: "mx.array",
-    features: "mx.array",
-    query_points: "mx.array",
+    coords: mx.array,
+    features: mx.array,
+    query_points: mx.array,
     resolution: int,
-) -> "mx.array":
+) -> mx.array:
     """Trilinear interpolation of per-voxel features at query points. See spec §5.7."""
     raise NotImplementedError
 
@@ -60,20 +60,20 @@ def trilinear_bake(
 
 
 def sparse_attention(
-    q: "mx.array",
-    k: "mx.array",
-    v: "mx.array",
-    mask: "mx.array | None" = None,
-) -> "mx.array":
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    mask: mx.array | None = None,
+) -> mx.array:
     """Flash-style sparse-token self-attention with VJP. See spec §5.1."""
     raise NotImplementedError
 
 
 def submanifold_conv3(
-    x: "mx.array",
-    weight: "mx.array",
-    neighbor_table: "mx.array",
-    bias: "mx.array | None" = None,
-) -> "mx.array":
+    x: mx.array,
+    weight: mx.array,
+    neighbor_table: mx.array,
+    bias: mx.array | None = None,
+) -> mx.array:
     """3×3×3 submanifold sparse conv with VJP. See spec §5.2."""
     raise NotImplementedError

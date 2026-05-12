@@ -53,7 +53,7 @@ class SparseSelfAttention(nn.Module):
         self.rope_base = rope_base
         raise NotImplementedError("SparseSelfAttention lands in Phase 1 step 7")
 
-    def __call__(self, x: "mx.array", coords: "mx.array") -> "mx.array":
+    def __call__(self, x: mx.array, coords: mx.array) -> mx.array:
         """Apply attention.
 
         Parameters
@@ -80,6 +80,6 @@ class CrossAttention(nn.Module):
         self.head_dim = head_dim
         raise NotImplementedError
 
-    def __call__(self, x: "mx.array", kv: "mx.array") -> "mx.array":
+    def __call__(self, x: mx.array, kv: mx.array) -> mx.array:
         """Apply cross-attention. ``x`` is ``[L, dim]``, ``kv`` is ``[Nimg, dim]``."""
         raise NotImplementedError

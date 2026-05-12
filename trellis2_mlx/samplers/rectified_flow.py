@@ -10,21 +10,22 @@ Reference: Liu et al., "Flow Straight and Fast", arXiv 2209.03003.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import mlx.core as mx
 
 
 def sample(
-    velocity_fn: Callable[..., "mx.array"],
-    x_init: "mx.array",
+    velocity_fn: Callable[..., mx.array],
+    x_init: mx.array,
     *,
     num_steps: int = 25,
     cfg_scale: float = 3.0,
     cond: object | None = None,
     uncond: object | None = None,
-) -> "mx.array":
+) -> mx.array:
     """Integrate the rectified-flow ODE from noise to data.
 
     Parameters

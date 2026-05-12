@@ -19,11 +19,11 @@ if TYPE_CHECKING:
 
 
 def apply_rope_3d(
-    x: "mx.array",
-    coords: "mx.array",
+    x: mx.array,
+    coords: mx.array,
     *,
     base: float = 10000.0,
-) -> "mx.array":
+) -> mx.array:
     """Rotate the last dim of ``x`` by 3D RoPE driven by ``coords``.
 
     Parameters
