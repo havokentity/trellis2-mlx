@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
+import numpy as np
 
 
 def _to_mx(value: Any) -> mx.array:
@@ -117,6 +118,57 @@ def dinov3_from_pt_state_dict(
         if k in pt_state_dict:
             out[k] = _to_mx(pt_state_dict[k])
 
+    return list(out.items())
+
+
+def _convert_sparse_conv3d_weight(pt_w: Any) -> mx.array:
+    """Permute a SparseConv3d weight from ``[Co, Kd, Kh, Kw, Ci]`` (upstream's
+    flex_gemm layout) to ``[27, Ci, Co]`` (our SubMConv3 layout).
+
+    The 27 axis is z-y-x scan order — slot ``kd*9 + kh*3 + kw`` corresponds
+    to the offset ``(kd-1, kh-1, kw-1)``, matching
+    :func:`trellis2_mlx.ovoxel.data.neighbor_offset_index`.
+
+    See ``docs/weight-inventory.md`` (sparse-conv weight-layout note) and
+    ``reference/microsoft-trellis2/trellis2/modules/sparse/conv/conv_flex_gemm.py:36``.
+    """
+    arr = np.asarray(pt_w)
+    if arr.ndim != 5 or arr.shape[1:4] != (3, 3, 3):
+        raise ValueError(f"expected SparseConv3d weight [Co, 3, 3, 3, Ci], got {arr.shape}")
+    co, _, _, _, ci = arr.shape
+    # [Co, Kd, Kh, Kw, Ci] → [Kd, Kh, Kw, Ci, Co] → [27, Ci, Co]
+    return _to_mx(arr.transpose(1, 2, 3, 4, 0).reshape(27, ci, co))
+
+
+def convnext_block_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+) -> list[tuple[str, mx.array]]:
+    """Convert one SC-VAE ConvNeXt block's PT state dict to MLX param pairs.
+
+    Expected input keys (per the upstream ``SparseConvNeXtBlock3d``):
+
+    * ``conv.weight``  ``[Co, 3, 3, 3, Ci]`` (with ``Co == Ci`` in this block)
+    * ``conv.bias``    ``[Co]``  (may be absent)
+    * ``norm.weight``  ``[C]``
+    * ``norm.bias``    ``[C]``
+    * ``mlp.0.weight`` ``[mlp_C, C]``  (PT calls it ``mlp.0`` because it's
+      the first Sequential entry)
+    * ``mlp.0.bias``   ``[mlp_C]``
+    * ``mlp.2.weight`` ``[C, mlp_C]``
+    * ``mlp.2.bias``   ``[C]``
+
+    Output is suitable for ``SparseConvNeXtBlock3d.load_weights(...)``.
+    """
+    out: dict[str, mx.array] = {}
+    out["conv_weight"] = _convert_sparse_conv3d_weight(pt_state_dict["conv.weight"])
+    if "conv.bias" in pt_state_dict:
+        out["conv_bias"] = _to_mx(pt_state_dict["conv.bias"])
+    out["norm.weight"] = _to_mx(pt_state_dict["norm.weight"])
+    out["norm.bias"] = _to_mx(pt_state_dict["norm.bias"])
+    out["mlp_up.weight"] = _to_mx(pt_state_dict["mlp.0.weight"])
+    out["mlp_up.bias"] = _to_mx(pt_state_dict["mlp.0.bias"])
+    out["mlp_down.weight"] = _to_mx(pt_state_dict["mlp.2.weight"])
+    out["mlp_down.bias"] = _to_mx(pt_state_dict["mlp.2.bias"])
     return list(out.items())
 
 
