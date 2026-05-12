@@ -47,9 +47,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rajeshdmonte/trellis2-mlx"
-Repository = "https://github.com/rajeshdmonte/trellis2-mlx"
-Issues = "https://github.com/rajeshdmonte/trellis2-mlx/issues"
+Homepage = "https://github.com/havokentity/trellis2-mlx"
+Repository = "https://github.com/havokentity/trellis2-mlx"
+Issues = "https://github.com/havokentity/trellis2-mlx/issues"
 
 [tool.setuptools.packages.find]
 include = ["trellis2_mlx*"]
