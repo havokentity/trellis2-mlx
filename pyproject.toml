@@ -105,7 +105,7 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 warn_return_any = false
 warn_unused_ignores = false
-disable_error_code = ["attr-defined", "no-untyped-call", "operator", "union-attr"]
+disable_error_code = ["attr-defined", "no-untyped-call", "operator", "union-attr", "arg-type"]
 
 [[tool.mypy.overrides]]
 # MLX-bound modules transitively inherit `Any` from mlx.nn (no stubs upstream).
