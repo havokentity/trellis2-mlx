@@ -203,6 +203,68 @@ def c2s_upsample_block_from_pt_state_dict(
     return list(out.items())
 
 
+def shape_decoder_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+    *,
+    num_blocks: tuple[int, ...] = (4, 16, 8, 4, 0),
+) -> list[tuple[str, mx.array]]:
+    """Convert the full SC-VAE shape decoder PT state dict to MLX param pairs.
+
+    The upstream stores parameters under ``blocks.{stage}.{block}.{...}`` with
+    a mixture of ConvNeXt blocks (positions ``0..num_blocks[stage]-1``) and
+    one upsample block (position ``num_blocks[stage]``) per non-final stage.
+    Plus ``from_latent.{weight, bias}`` and ``output_layer.{weight, bias}``
+    at the top level.
+
+    Parameters
+    ----------
+    pt_state_dict : mapping
+        ``{name: numpy_array}`` covering every parameter in
+        ``shape_dec_next_dc_f16c32_fp16.safetensors``.
+    num_blocks : tuple of int
+        Per-stage ConvNeXt block counts. Default matches the published
+        ``shape_vae_next_dc_f16c32_fp16.json``: ``(4, 16, 8, 4, 0)``. The
+        upsample slot at the end of each non-final stage is appended
+        implicitly.
+
+    Returns
+    -------
+    list[tuple[str, mx.array]]
+        Suitable for ``ShapeDecoder.load_weights(...)``.
+    """
+    out: list[tuple[str, mx.array]] = []
+
+    # from_latent and output_layer — plain Linear weights.
+    out.append(("from_latent.weight", _to_mx(pt_state_dict["from_latent.weight"])))
+    out.append(("from_latent.bias", _to_mx(pt_state_dict["from_latent.bias"])))
+    out.append(("output_layer.weight", _to_mx(pt_state_dict["output_layer.weight"])))
+    out.append(("output_layer.bias", _to_mx(pt_state_dict["output_layer.bias"])))
+
+    # Per-stage blocks.
+    for stage_idx, n_convnext in enumerate(num_blocks):
+        # ConvNeXt blocks at positions 0..n_convnext-1
+        for block_idx in range(n_convnext):
+            prefix_pt = f"blocks.{stage_idx}.{block_idx}."
+            prefix_mlx = f"blocks.{stage_idx}.{block_idx}."
+            block_state = {
+                k[len(prefix_pt) :]: v for k, v in pt_state_dict.items() if k.startswith(prefix_pt)
+            }
+            for sub_name, arr in convnext_block_from_pt_state_dict(block_state):
+                out.append((prefix_mlx + sub_name, arr))
+        # Upsample at the end of each non-final stage.
+        if stage_idx < len(num_blocks) - 1:
+            up_idx = n_convnext
+            prefix_pt = f"blocks.{stage_idx}.{up_idx}."
+            prefix_mlx = f"blocks.{stage_idx}.{up_idx}."
+            block_state = {
+                k[len(prefix_pt) :]: v for k, v in pt_state_dict.items() if k.startswith(prefix_pt)
+            }
+            for sub_name, arr in c2s_upsample_block_from_pt_state_dict(block_state):
+                out.append((prefix_mlx + sub_name, arr))
+
+    return out
+
+
 def convert_checkpoint(src_dir: str | Path, dst_dir: str | Path) -> None:
     """Convert the full TRELLIS.2-4B safetensors at ``src_dir`` to MLX format.
 
