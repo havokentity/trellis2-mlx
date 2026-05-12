@@ -172,6 +172,37 @@ def convnext_block_from_pt_state_dict(
     return list(out.items())
 
 
+def c2s_upsample_block_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+) -> list[tuple[str, mx.array]]:
+    """Convert one ``SparseResBlockC2S3d`` PT state dict to MLX param pairs.
+
+    Expected upstream keys:
+
+    * ``to_subdiv.weight`` ``[8, in_C]``,    ``to_subdiv.bias`` ``[8]``
+    * ``norm1.weight`` / ``norm1.bias``      (affine, ``[in_C]``)
+    * ``conv1.weight``     ``[out_C * 8, 3, 3, 3, in_C]``
+    * ``conv1.bias``       ``[out_C * 8]``
+    * ``conv2.weight``     ``[out_C, 3, 3, 3, out_C]``
+    * ``conv2.bias``       ``[out_C]``
+
+    The norm2 sub-block is non-affine and has no stored params.
+
+    Output is suitable for ``SparseResBlockC2S3d.load_weights(...)``.
+    """
+    out: dict[str, mx.array] = {
+        "to_subdiv.weight": _to_mx(pt_state_dict["to_subdiv.weight"]),
+        "to_subdiv.bias": _to_mx(pt_state_dict["to_subdiv.bias"]),
+        "norm1.weight": _to_mx(pt_state_dict["norm1.weight"]),
+        "norm1.bias": _to_mx(pt_state_dict["norm1.bias"]),
+        "conv1_weight": _convert_sparse_conv3d_weight(pt_state_dict["conv1.weight"]),
+        "conv1_bias": _to_mx(pt_state_dict["conv1.bias"]),
+        "conv2_weight": _convert_sparse_conv3d_weight(pt_state_dict["conv2.weight"]),
+        "conv2_bias": _to_mx(pt_state_dict["conv2.bias"]),
+    }
+    return list(out.items())
+
+
 def convert_checkpoint(src_dir: str | Path, dst_dir: str | Path) -> None:
     """Convert the full TRELLIS.2-4B safetensors at ``src_dir`` to MLX format.
 

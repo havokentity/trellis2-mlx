@@ -40,11 +40,15 @@ import torch.nn.functional as F  # noqa: N812 — standard PyTorch alias
 from trellis2_mlx.nn.sparse_blocks import (
     _CHILD_OFFSETS,
     SparseConvNeXtBlock3d,
+    SparseResBlockC2S3d,
     sparse_channel_to_spatial,
 )
 from trellis2_mlx.ovoxel.data import build_neighbor_table
 from trellis2_mlx.tests.test_sparse_conv import _brute_force_submconv3, _random_active_set
-from trellis2_mlx.utils.weight_convert import convnext_block_from_pt_state_dict
+from trellis2_mlx.utils.weight_convert import (
+    c2s_upsample_block_from_pt_state_dict,
+    convnext_block_from_pt_state_dict,
+)
 
 pytestmark = pytest.mark.reference
 
@@ -374,3 +378,224 @@ def test_sparse_channel_to_spatial_brute_force_parity(seed: int) -> None:
 
     np.testing.assert_array_equal(fc_np, exp_coords_arr)
     np.testing.assert_allclose(ff_np, exp_feats_arr, atol=0, rtol=0)
+
+
+# ── SparseResBlockC2S3d ───────────────────────────────────────────────────
+
+
+def _pt_reference_c2s_block(
+    x: np.ndarray,
+    coords_coarse: np.ndarray,
+    coarse_nt: np.ndarray,
+    fine_resolution: int,
+    in_channels: int,
+    out_channels: int,
+    to_subdiv_w: np.ndarray,
+    to_subdiv_b: np.ndarray,
+    norm1_w: np.ndarray,
+    norm1_b: np.ndarray,
+    conv1_w_27_ci_co: np.ndarray,
+    conv1_b: np.ndarray,
+    conv2_w_27_ci_co: np.ndarray,
+    conv2_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Pure-PyTorch reference for SparseResBlockC2S3d.
+
+    Returns (fine_feats, fine_coords, fine_nt, subdiv_logits).
+    """
+    with torch.no_grad():
+        # 1. Subdiv prediction
+        x_t = torch.from_numpy(x)
+        subdiv_logits = F.linear(x_t, torch.from_numpy(to_subdiv_w), torch.from_numpy(to_subdiv_b))
+        subdivision = subdiv_logits.numpy() > 0
+
+        # 2. Coarse path
+        norm1 = torch.nn.LayerNorm(in_channels, eps=1e-6, elementwise_affine=True)
+        norm1.weight.data.copy_(torch.from_numpy(norm1_w))
+        norm1.bias.data.copy_(torch.from_numpy(norm1_b))
+        h = F.silu(norm1(x_t)).numpy()
+        h = _brute_force_submconv3(h, conv1_w_27_ci_co, coarse_nt, conv1_b)
+
+    # 3. channel-to-spatial on h: [L_c, out_channels * 8] → [L_f, out_channels]
+    n_coarse = x.shape[0]
+    parent_idx_arr, child_slot_arr = np.nonzero(subdivision)
+    if parent_idx_arr.size == 0:
+        return (
+            np.zeros((0, out_channels), dtype=np.float32),
+            np.zeros((0, 3), dtype=np.int32),
+            np.zeros((0, 27), dtype=np.int32),
+            subdiv_logits.numpy(),
+        )
+    h_flat = h.reshape(n_coarse * 8, out_channels)
+    h_fine_pre = h_flat[parent_idx_arr * 8 + child_slot_arr]
+
+    # 4. channel-to-spatial on x: [L_c, in_channels] → [L_f, in_channels // 8]
+    x_flat = x.reshape(n_coarse * 8, in_channels // 8)
+    x_fine_small = x_flat[parent_idx_arr * 8 + child_slot_arr]
+
+    # Build fine coords
+    fine_coords = (coords_coarse[parent_idx_arr] * 2 + _CHILD_OFFSETS[child_slot_arr]).astype(
+        np.int32
+    )
+
+    fine_nt = np.asarray(build_neighbor_table(mx.array(fine_coords), resolution=fine_resolution))
+
+    # 5. Fine path: non-affine LayerNorm + silu + conv2
+    with torch.no_grad():
+        h_fine_t = torch.from_numpy(h_fine_pre)
+        norm2 = torch.nn.LayerNorm(out_channels, eps=1e-6, elementwise_affine=False)
+        h_fine_t = F.silu(norm2(h_fine_t))
+    h_fine_post_conv = _brute_force_submconv3(h_fine_t.numpy(), conv2_w_27_ci_co, fine_nt, conv2_b)
+
+    # 6. Skip: repeat_interleave on x_fine_small
+    skip_repeat = out_channels // (in_channels // 8)
+    skip = np.repeat(x_fine_small, skip_repeat, axis=1)
+    out_feats = h_fine_post_conv + skip
+    return out_feats, fine_coords, fine_nt, subdiv_logits.numpy()
+
+
+def test_c2s_block_random_init_parity() -> None:
+    """Random weights, 16 → 8 channels, 16 random parents on a 4³ grid."""
+    rng = np.random.default_rng(0)
+    in_channels = 16
+    out_channels = 8
+    coarse_res = 4
+    fine_res = 8
+
+    coords_coarse = _random_active_set(16, coarse_res, seed=0)
+    coarse_nt = np.asarray(build_neighbor_table(mx.array(coords_coarse), resolution=coarse_res))
+    x = rng.standard_normal((coords_coarse.shape[0], in_channels)).astype(np.float32) * 0.5
+
+    # Random PT-layout weights
+    pt_state = {
+        "to_subdiv.weight": rng.standard_normal((8, in_channels)).astype(np.float32) * 0.5,
+        "to_subdiv.bias": rng.standard_normal(8).astype(np.float32) * 0.5,
+        "norm1.weight": rng.standard_normal(in_channels).astype(np.float32),
+        "norm1.bias": rng.standard_normal(in_channels).astype(np.float32) * 0.1,
+        "conv1.weight": rng.standard_normal((out_channels * 8, 3, 3, 3, in_channels)).astype(
+            np.float32
+        )
+        * 0.05,
+        "conv1.bias": rng.standard_normal(out_channels * 8).astype(np.float32) * 0.05,
+        "conv2.weight": rng.standard_normal((out_channels, 3, 3, 3, out_channels)).astype(
+            np.float32
+        )
+        * 0.05,
+        "conv2.bias": rng.standard_normal(out_channels).astype(np.float32) * 0.05,
+    }
+
+    block = SparseResBlockC2S3d(in_channels, out_channels)
+    block.load_weights(c2s_upsample_block_from_pt_state_dict(pt_state))
+
+    mlx_feats, mlx_fine_coords, mlx_fine_nt, mlx_subdiv = block(
+        mx.array(x),
+        mx.array(coords_coarse),
+        mx.array(coarse_nt),
+        fine_resolution=fine_res,
+    )
+    mlx_feats_np = np.asarray(mlx_feats)
+    mlx_fine_coords_np = np.asarray(mlx_fine_coords)
+
+    # PT reference with same conv weight permutation
+    conv1_w_27_ci_co = (
+        pt_state["conv1.weight"].transpose(1, 2, 3, 4, 0).reshape(27, in_channels, out_channels * 8)
+    )
+    conv2_w_27_ci_co = (
+        pt_state["conv2.weight"].transpose(1, 2, 3, 4, 0).reshape(27, out_channels, out_channels)
+    )
+    ref_feats, ref_fine_coords, _, _ = _pt_reference_c2s_block(
+        x,
+        coords_coarse,
+        coarse_nt,
+        fine_res,
+        in_channels,
+        out_channels,
+        pt_state["to_subdiv.weight"],
+        pt_state["to_subdiv.bias"],
+        pt_state["norm1.weight"],
+        pt_state["norm1.bias"],
+        conv1_w_27_ci_co,
+        pt_state["conv1.bias"],
+        conv2_w_27_ci_co,
+        pt_state["conv2.bias"],
+    )
+
+    np.testing.assert_array_equal(mlx_fine_coords_np, ref_fine_coords)
+    diff = np.abs(mlx_feats_np - ref_feats)
+    msg = f"max={diff.max():.3e}  mean={diff.mean():.3e}  L_fine={mlx_feats_np.shape[0]}"
+    assert diff.max() < 1e-4, msg
+
+
+@pytest.mark.slow
+def test_c2s_block_real_weights_parity_blocks_0_4() -> None:
+    """Load blocks.0.4 (first upsample: 1024 → 512) from the real shape decoder.
+
+    Channels at this stage are the largest in the network (1024 in, 4096 conv1
+    out), so we use a tiny active set to keep the brute-force reference fast.
+    """
+    p = _shape_decoder_path()
+    block_keys = {
+        "to_subdiv.weight": "blocks.0.4.to_subdiv.weight",
+        "to_subdiv.bias": "blocks.0.4.to_subdiv.bias",
+        "norm1.weight": "blocks.0.4.norm1.weight",
+        "norm1.bias": "blocks.0.4.norm1.bias",
+        "conv1.weight": "blocks.0.4.conv1.weight",
+        "conv1.bias": "blocks.0.4.conv1.bias",
+        "conv2.weight": "blocks.0.4.conv2.weight",
+        "conv2.bias": "blocks.0.4.conv2.bias",
+    }
+    raw = _safetensors_load_keys(p, list(block_keys.values()))
+    pt_state = {short: raw[full].astype(np.float32) for short, full in block_keys.items()}
+
+    in_channels = pt_state["norm1.weight"].shape[0]
+    out_channels = pt_state["conv2.bias"].shape[0]
+    assert in_channels == 1024 and out_channels == 512, (in_channels, out_channels)
+
+    rng = np.random.default_rng(0)
+    coarse_res = 16
+    fine_res = 32
+    n_coarse = 32  # small — brute-force conv1 at 1024→4096 channels is the bottleneck
+    coords_coarse = _random_active_set(n_coarse, coarse_res, seed=0)
+    coarse_nt = np.asarray(build_neighbor_table(mx.array(coords_coarse), resolution=coarse_res))
+    x = rng.standard_normal((n_coarse, in_channels)).astype(np.float32) * 0.5
+
+    block = SparseResBlockC2S3d(in_channels, out_channels)
+    block.load_weights(c2s_upsample_block_from_pt_state_dict(pt_state))
+    mlx_feats, mlx_fine_coords, _, _ = block(
+        mx.array(x),
+        mx.array(coords_coarse),
+        mx.array(coarse_nt),
+        fine_resolution=fine_res,
+    )
+
+    conv1_w_27 = (
+        pt_state["conv1.weight"].transpose(1, 2, 3, 4, 0).reshape(27, in_channels, out_channels * 8)
+    )
+    conv2_w_27 = (
+        pt_state["conv2.weight"].transpose(1, 2, 3, 4, 0).reshape(27, out_channels, out_channels)
+    )
+    ref_feats, ref_fine_coords, _, _ = _pt_reference_c2s_block(
+        x,
+        coords_coarse,
+        coarse_nt,
+        fine_res,
+        in_channels,
+        out_channels,
+        pt_state["to_subdiv.weight"],
+        pt_state["to_subdiv.bias"],
+        pt_state["norm1.weight"],
+        pt_state["norm1.bias"],
+        conv1_w_27,
+        pt_state["conv1.bias"],
+        conv2_w_27,
+        pt_state["conv2.bias"],
+    )
+
+    np.testing.assert_array_equal(np.asarray(mlx_fine_coords), ref_fine_coords)
+    diff = np.abs(np.asarray(mlx_feats) - ref_feats)
+    msg = (
+        f"max={diff.max():.3e}  mean={diff.mean():.3e}  p99={np.percentile(diff, 99):.3e}  "
+        f"(L_fine={mlx_feats.shape[0]}, ref_std={ref_feats.std():.3f})"
+    )
+    assert diff.mean() < 5e-3, msg
+    assert diff.max() < 5e-2, msg
