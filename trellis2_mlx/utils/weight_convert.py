@@ -262,6 +262,78 @@ def dit_block_from_pt_state_dict(
     return out
 
 
+def slat_flow_model_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+    *,
+    num_blocks: int = 30,
+) -> list[tuple[str, mx.array]]:
+    """Convert a full SLAT DiT (``SLatFlowModel``) PT state dict to MLX pairs.
+
+    Maps:
+
+    * ``input_layer.{weight, bias}`` → same
+    * ``out_layer.{weight, bias}``   → same
+    * ``t_embedder.mlp.{0,2}.{weight,bias}`` → ``t_embedder.mlp.layers.{0,2}.*``
+      (PT stores the Sequential under ``mlp`` with bare integer keys; MLX's
+      ``nn.Sequential`` exposes children under ``.layers.`` — see
+      ``test_dit_block.py`` for the same pattern at block scale.)
+    * ``adaLN_modulation.1.{weight, bias}`` → ``adaLN_modulation.mlp.layers.1.*``
+      (PT places ``nn.Sequential(SiLU, Linear)`` directly at
+      ``adaLN_modulation``; our :class:`~trellis2_mlx.nn.adaln.AdaLNSingle`
+      wraps it under ``.mlp``.)
+    * ``blocks.{i}.*``  → same, via :func:`dit_block_from_pt_state_dict`.
+
+    Parameters
+    ----------
+    pt_state_dict : mapping
+        ``{name: numpy_array}`` covering every parameter in the SLAT
+        ``.safetensors``.
+    num_blocks : int
+        Block count (30 for every published checkpoint).
+    """
+    out: list[tuple[str, mx.array]] = []
+    out.append(("input_layer.weight", _to_mx(pt_state_dict["input_layer.weight"])))
+    out.append(("input_layer.bias", _to_mx(pt_state_dict["input_layer.bias"])))
+    out.append(("out_layer.weight", _to_mx(pt_state_dict["out_layer.weight"])))
+    out.append(("out_layer.bias", _to_mx(pt_state_dict["out_layer.bias"])))
+
+    # TimestepEmbedder: PT Sequential at .mlp with bare integers; MLX needs
+    # `.mlp.layers.{i}`.
+    for i in (0, 2):
+        w = pt_state_dict.get(f"t_embedder.mlp.{i}.weight")
+        b = pt_state_dict.get(f"t_embedder.mlp.{i}.bias")
+        if w is None or b is None:
+            raise KeyError(f"missing t_embedder.mlp.{i}.* in state dict")
+        out.append((f"t_embedder.mlp.layers.{i}.weight", _to_mx(w)))
+        out.append((f"t_embedder.mlp.layers.{i}.bias", _to_mx(b)))
+
+    # AdaLNSingle: PT puts nn.Sequential(SiLU, Linear) directly at
+    # adaLN_modulation; our class wraps it under .mlp.
+    out.append(
+        (
+            "adaLN_modulation.mlp.layers.1.weight",
+            _to_mx(pt_state_dict["adaLN_modulation.1.weight"]),
+        )
+    )
+    out.append(
+        (
+            "adaLN_modulation.mlp.layers.1.bias",
+            _to_mx(pt_state_dict["adaLN_modulation.1.bias"]),
+        )
+    )
+
+    # Blocks — delegate to per-block converter.
+    for i in range(num_blocks):
+        prefix_pt = f"blocks.{i}."
+        block_state = {
+            k[len(prefix_pt) :]: v for k, v in pt_state_dict.items() if k.startswith(prefix_pt)
+        }
+        for sub_name, arr in dit_block_from_pt_state_dict(block_state):
+            out.append((f"blocks.{i}.{sub_name}", arr))
+
+    return out
+
+
 def shape_decoder_from_pt_state_dict(
     pt_state_dict: Mapping[str, Any],
     *,
