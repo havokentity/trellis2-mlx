@@ -1,0 +1,39 @@
+# Normalize text line endings on checkin and let Git auto-detect text vs binary.
+* text=auto eol=lf
+
+# Source files — explicit text
+*.py     text diff=python
+*.pyi    text diff=python
+*.metal  text
+*.toml   text
+*.md     text
+*.txt    text
+*.cfg    text
+*.json   text
+*.yml    text
+*.yaml   text
+*.cfg    text
+
+# Binary asset patterns. These are gitignored, but if anyone bypasses the
+# ignore (e.g. for a tiny sample), Git should treat them as binary, not try
+# to diff/merge them, and route through LFS.
+*.safetensors filter=lfs diff=lfs merge=lfs -text
+*.bin         filter=lfs diff=lfs merge=lfs -text
+*.pt          filter=lfs diff=lfs merge=lfs -text
+*.pth         filter=lfs diff=lfs merge=lfs -text
+*.ckpt        filter=lfs diff=lfs merge=lfs -text
+*.glb         filter=lfs diff=lfs merge=lfs -text
+*.gltf        filter=lfs diff=lfs merge=lfs -text
+*.obj         filter=lfs diff=lfs merge=lfs -text
+*.ply         filter=lfs diff=lfs merge=lfs -text
+*.usdz        filter=lfs diff=lfs merge=lfs -text
+*.mp4         filter=lfs diff=lfs merge=lfs -text
+*.mov         filter=lfs diff=lfs merge=lfs -text
+*.npy         filter=lfs diff=lfs merge=lfs -text
+*.npz         filter=lfs diff=lfs merge=lfs -text
+*.png         binary
+*.jpg         binary
+*.jpeg        binary
+
+# Don't include reference upstream or downloaded weights in language stats.
+reference/** linguist-vendored

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trellis2-mlx"
+version = "0.0.0"
+description = "Apple Silicon port of Microsoft TRELLIS.2 image-to-3D generation, built on MLX with custom Metal kernels."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Rajesh D'Monte" }]
+keywords = ["mlx", "metal", "apple-silicon", "trellis", "image-to-3d", "3d-generation"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Environment :: GPU :: Apple Metal",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mlx>=0.20.0",
+    "safetensors>=0.4.3",
+    "huggingface-hub>=0.24.0",
+    "Pillow>=10.0.0",
+    "trimesh>=4.4.0",
+    "transformers>=4.44.0",
+    "einops>=0.8.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-xdist>=3.6.0",
+    "ruff>=0.6.0",
+    "mypy>=1.10.0",
+    # PyTorch is permitted ONLY as a CPU-only numerical reference for tests.
+    # It must never appear in the runtime path of the MLX pipeline.
+    "torch>=2.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/rajeshdmonte/trellis2-mlx"
+Repository = "https://github.com/rajeshdmonte/trellis2-mlx"
+Issues = "https://github.com/rajeshdmonte/trellis2-mlx/issues"
+
+[tool.setuptools.packages.find]
+include = ["trellis2_mlx*"]
+exclude = ["reference*", "docs*"]
+
+[tool.setuptools.package-data]
+"trellis2_mlx" = ["metal/kernels/*.metal"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+exclude = ["reference/", "build/"]
+
+[[tool.mypy.overrides]]
+module = ["mlx.*", "trimesh.*", "transformers.*", "einops.*", "huggingface_hub.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["trellis2_mlx/tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+markers = [
+    "metal: tests that require a Metal-capable GPU (Apple Silicon)",
+    "slow: tests that take more than a few seconds",
+    "reference: tests that compare against a PyTorch CPU reference",
+]
