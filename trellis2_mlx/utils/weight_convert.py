@@ -334,6 +334,23 @@ def slat_flow_model_from_pt_state_dict(
     return out
 
 
+def ss_flow_model_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+    *,
+    num_blocks: int = 30,
+) -> list[tuple[str, mx.array]]:
+    """Convert a Sparse-Structure DiT (stage 1) PT state dict to MLX pairs.
+
+    The architecture is identical to the SLAT DiT under the hood — our
+    :class:`~trellis2_mlx.models.dit.SparseStructureFlowModel` embeds a
+    :class:`~trellis2_mlx.models.dit.SLatFlowModel` under ``self.inner``,
+    so this is :func:`slat_flow_model_from_pt_state_dict` with every key
+    prefixed by ``inner.``.
+    """
+    inner_pairs = slat_flow_model_from_pt_state_dict(pt_state_dict, num_blocks=num_blocks)
+    return [(f"inner.{k}", v) for k, v in inner_pairs]
+
+
 def shape_decoder_from_pt_state_dict(
     pt_state_dict: Mapping[str, Any],
     *,

@@ -139,18 +139,126 @@ class SLatFlowModel(nn.Module):
         return self.out_layer(h)
 
 
-class SparseStructureFlowModel(nn.Module):
-    """Stage 1 — sparse-structure DiT. **Dense** small grid (16³ × 8 ch).
+@dataclass(frozen=True)
+class SparseStructureFlowConfig:
+    """Static config for the stage-1 sparse-structure DiT.
 
-    Stub for now; the dense variant uses the same block class but runs
-    over a small full-grid tensor with precomputed RoPE phases. Lands once
-    we wire stage 1 into the pipeline (the bigger gain is from stages 2/3
-    which dominate inference time at the 1024³ output).
+    Defaults match ``configs/gen/ss_flow_img_dit_1_3B_64_bf16.json``:
+    dense 16³ grid with 8 latent channels per voxel. The "_64_" in the
+    checkpoint name refers to the SS-VAE's *output* resolution (16 × 4 = 64);
+    the DiT itself runs at 16³.
     """
 
-    def __init__(self) -> None:
+    resolution: int = 16
+    in_channels: int = 8
+    out_channels: int = 8
+    model_channels: int = 1536
+    cond_channels: int = 1024
+    num_blocks: int = 30
+    num_heads: int = 12
+    mlp_ratio: float = 5.3334
+    rope_base: float = 10000.0
+
+
+class SparseStructureFlowModel(nn.Module):
+    """Stage 1 — sparse-structure DiT (dense 16³ × 8ch).
+
+    Reuses :class:`SLatFlowModel`'s blocks but accepts a **dense**
+    ``[B, C, D, H, W]`` input (matching upstream
+    ``sparse_structure_flow.py:224-247``). Internally:
+
+    1. Reshape to ``[L, C_in]`` where ``L = D * H * W`` (all voxels of
+       the dense grid are tokens).
+    2. Build the static ``[L, 3]`` coords meshgrid once (cached per
+       resolution).
+    3. Run the same DiT stack.
+    4. Reshape back to ``[B, C_out, D, H, W]``.
+
+    For ``B = 1`` (inference) we drop the batch dim entirely inside the
+    transformer. CFG is handled at the sampler level by calling the
+    model twice with different conditioning.
+    """
+
+    def __init__(self, cfg: SparseStructureFlowConfig | None = None) -> None:
         super().__init__()
-        raise NotImplementedError("SparseStructureFlowModel lands with the stage-1 pipeline wiring")
+        self.cfg = cfg or SparseStructureFlowConfig()
+        c = self.cfg
+
+        # Reuse the SLatFlowModel for everything except the dense reshape.
+        # Same blocks, same parameter paths — the weight converter is
+        # bitwise-identical (slat_flow_model_from_pt_state_dict).
+        slat_cfg = SLatFlowConfig(
+            resolution=c.resolution,
+            in_channels=c.in_channels,
+            out_channels=c.out_channels,
+            model_channels=c.model_channels,
+            cond_channels=c.cond_channels,
+            num_blocks=c.num_blocks,
+            num_heads=c.num_heads,
+            mlp_ratio=c.mlp_ratio,
+            rope_base=c.rope_base,
+        )
+        # Embed the SLAT model under `inner` — the weight converter routes
+        # every PT key through `inner.*` so the parameter paths line up.
+        self.inner = SLatFlowModel(slat_cfg)
+
+        # Precompute the dense coord meshgrid for RoPE-3D. Shape [L, 3]
+        # with coord order (z, y, x) matching the rest of the codebase.
+        r = c.resolution
+        grids = mx.meshgrid(
+            mx.arange(r, dtype=mx.int32),
+            mx.arange(r, dtype=mx.int32),
+            mx.arange(r, dtype=mx.int32),
+            indexing="ij",
+        )
+        coords = mx.stack(list(grids), axis=-1).reshape(-1, 3)
+        # Store as a frozen attribute (not a parameter — RoPE coords are static).
+        self._coords = coords
+
+    def __call__(self, x: mx.array, t: mx.array, cond: mx.array) -> mx.array:
+        """Run one denoising step on the dense small grid.
+
+        Parameters
+        ----------
+        x : mx.array
+            ``[B, C_in, D, H, W]`` or ``[C_in, D, H, W]`` dense latent.
+            ``D = H = W = resolution`` is enforced.
+        t : mx.array
+            ``[B]`` (or ``[1]``) timestep in ``[0, 1000]``.
+        cond : mx.array
+            ``[B, M, cond_channels]`` or ``[M, cond_channels]`` DINOv3
+            features.
+
+        Returns
+        -------
+        mx.array
+            Same shape and dtype as ``x``.
+        """
+        if x.ndim == 4:
+            x = x[None]
+        if x.ndim != 5:
+            raise ValueError(f"x must be [B, C, D, H, W] or [C, D, H, W]; got {x.shape}")
+        b, c_in, d, h, w = x.shape
+        if d != h or h != w or d != self.cfg.resolution:
+            raise ValueError(f"x spatial dims must be {self.cfg.resolution}³; got ({d}, {h}, {w})")
+        if b != 1:
+            raise NotImplementedError("SparseStructureFlowModel currently runs at B=1")
+
+        # [B, C, D, H, W] → [L, C]  (with B=1)
+        x_flat = x[0].reshape(c_in, -1).transpose(1, 0)  # [L, C]
+
+        # Run the same SLAT-style forward. The SLAT model's __call__ takes
+        # (x, coords, t, cond, *, concat_cond=None) — we have no concat_cond.
+        out_flat = self.inner(x_flat, self._coords, t, cond)
+
+        # Back to [B, C, D, H, W]
+        out = out_flat.transpose(1, 0).reshape(self.cfg.out_channels, d, h, w)[None]
+        return out
 
 
-__all__ = ["SLatFlowConfig", "SLatFlowModel", "SparseStructureFlowModel"]
+__all__ = [
+    "SLatFlowConfig",
+    "SLatFlowModel",
+    "SparseStructureFlowConfig",
+    "SparseStructureFlowModel",
+]
