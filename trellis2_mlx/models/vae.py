@@ -225,3 +225,169 @@ class SCVAEMaterialDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         raise NotImplementedError("SCVAEMaterialDecoder lands after shape-decoder smoke test")
+
+
+# ── SS-VAE decoder (dense; from microsoft/TRELLIS-image-large) ───────────
+
+
+@dataclass(frozen=True)
+class SparseStructureDecoderConfig:
+    """Static config for the dense SS-VAE decoder.
+
+    Matches ``microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16``:
+    8-channel latent in, 1-channel occupancy out, 3 stages with channels
+    ``[512, 128, 32]`` and 2 residual blocks each (plus 2 in the middle).
+    Two upsample stages (×2 each) take 16³ → 64³.
+    """
+
+    out_channels: int = 1
+    latent_channels: int = 8
+    num_res_blocks: int = 2
+    num_res_blocks_middle: int = 2
+    channels: tuple[int, ...] = (512, 128, 32)
+
+
+def _pixel_shuffle_3d_ndhwc(x: mx.array) -> mx.array:
+    """3D pixel shuffle (factor=2) on an NDHWC tensor.
+
+    Mirrors ``reference/microsoft-trellis2/trellis2/modules/spatial.py:pixel_shuffle_3d``
+    but in NDHWC layout (MLX native):
+
+    ``[B, D, H, W, C*8] → [B, 2D, 2H, 2W, C]``.
+    """
+    b, d, h, w, c8 = x.shape
+    if c8 % 8 != 0:
+        raise ValueError(f"channels must be divisible by 8 for ×2 pixel-shuffle; got {c8}")
+    c = c8 // 8
+    # Reshape last dim into (2, 2, 2, C); then interleave with spatial axes.
+    # NCDHW pattern (upstream): permute(0, 1, 5, 2, 6, 3, 7, 4) — but in NDHWC
+    # the channel axis is at position 4, so we adapt to NDHWC.
+    # x: [B, D, H, W, 2_d, 2_h, 2_w, C]
+    x = x.reshape(b, d, h, w, 2, 2, 2, c)
+    # Re-interleave so neighbours in (kd, kh, kw) sit next to (D, H, W) and
+    # the trailing dim is just C.
+    # Permute target: [B, D, kd, H, kh, W, kw, C] = (0, 1, 4, 2, 5, 3, 6, 7)
+    x = x.transpose(0, 1, 4, 2, 5, 3, 6, 7)
+    return x.reshape(b, d * 2, h * 2, w * 2, c)
+
+
+class _SSResBlock3d(nn.Module):
+    """ResBlock3d from sparse_structure_vae.py:22-47 — dense Conv3d.
+
+    norm1 + SiLU + conv1 + norm2 + SiLU + conv2 + skip. With
+    ``in_channels == out_channels`` (the only case used in the published
+    checkpoint), ``skip_connection`` is ``Identity`` (no learned params).
+    """
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.channels = channels
+        # In MLX, nn.LayerNorm normalizes over the last axis. For NDHWC
+        # tensors that's the channel axis — exactly what upstream's
+        # ChannelLayerNorm32 (which moves channels to last, then LN) does.
+        self.norm1 = nn.LayerNorm(channels, eps=1e-5, affine=True)
+        self.norm2 = nn.LayerNorm(channels, eps=1e-5, affine=True)
+        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        h = self.norm1(x)
+        h = nn.silu(h)
+        h = self.conv1(h)
+        h = self.norm2(h)
+        h = nn.silu(h)
+        h = self.conv2(h)
+        return h + x
+
+
+class _SSUpsampleBlock3d(nn.Module):
+    """UpsampleBlock3d (Conv3d expanding ×8 + pixel_shuffle_3d).
+
+    Mirrors upstream's "conv" mode in sparse_structure_vae.py:75-98.
+    ``Conv3d(in, out * 8, kernel=3, padding=1)`` followed by a ×2 spatial
+    pixel-shuffle.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.conv = nn.Conv3d(in_channels, out_channels * 8, kernel_size=3, padding=1)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return _pixel_shuffle_3d_ndhwc(self.conv(x))
+
+
+class SparseStructureDecoder(nn.Module):
+    """SS-VAE decoder — dense conv-3d net from latent (16³ × 8ch) to a
+    64³ × 1ch occupancy field.
+
+    Implements
+    ``reference/microsoft-trellis2/trellis2/models/sparse_structure_vae.py:SparseStructureDecoder``.
+    The pipeline thresholds the output > 0 then max-pools to the chosen
+    stage-1 resolution (32 or 64) and uses the resulting nonzero coords as
+    the active voxel set for the SLAT DiTs.
+    """
+
+    def __init__(self, cfg: SparseStructureDecoderConfig | None = None) -> None:
+        super().__init__()
+        self.cfg = cfg or SparseStructureDecoderConfig()
+        c = self.cfg
+
+        self.input_layer = nn.Conv3d(c.latent_channels, c.channels[0], kernel_size=3, padding=1)
+
+        # 2 middle res blocks at channels[0]
+        self.middle_block = [_SSResBlock3d(c.channels[0]) for _ in range(c.num_res_blocks_middle)]
+
+        # Per-stage: num_res_blocks at channels[i], then Upsample(i → i+1)
+        # for i < len(channels) - 1.
+        self.blocks: list[nn.Module] = []
+        for i, ch in enumerate(c.channels):
+            for _ in range(c.num_res_blocks):
+                self.blocks.append(_SSResBlock3d(ch))
+            if i < len(c.channels) - 1:
+                self.blocks.append(_SSUpsampleBlock3d(ch, c.channels[i + 1]))
+
+        # Out: norm + SiLU + Conv3d(channels[-1] → out_channels). Upstream stores
+        # this as nn.Sequential(norm, silu, conv) — keys are out_layer.0.* (norm)
+        # and out_layer.2.* (conv).
+        self.out_layer = nn.Sequential(
+            nn.LayerNorm(c.channels[-1], eps=1e-5, affine=True),
+            nn.SiLU(),
+            nn.Conv3d(c.channels[-1], c.out_channels, kernel_size=3, padding=1),
+        )
+
+    def __call__(self, z: mx.array) -> mx.array:
+        """Decode a latent.
+
+        Parameters
+        ----------
+        z : mx.array
+            ``[B, latent_channels, D, H, W]`` (PT-style NCDHW) or
+            ``[B, D, H, W, latent_channels]`` (NDHWC). The forward auto-
+            detects which by checking which dim equals ``latent_channels``;
+            outputs match the input convention.
+
+        Returns
+        -------
+        mx.array
+            Occupancy logits at 4× spatial resolution
+            (``D * 4, H * 4, W * 4``). For 16³ input → 64³ output.
+        """
+        if z.ndim != 5:
+            raise ValueError(f"z must be 5D; got {z.shape}")
+        # Auto-detect NCDHW vs NDHWC.
+        nchw_input = z.shape[1] == self.cfg.latent_channels
+        if nchw_input:
+            z = z.transpose(0, 2, 3, 4, 1)  # → NDHWC
+
+        h = self.input_layer(z)
+        for blk in self.middle_block:
+            h = blk(h)
+        for blk in self.blocks:
+            h = blk(h)
+        h = self.out_layer(h)
+
+        if nchw_input:
+            h = h.transpose(0, 4, 1, 2, 3)  # back to NCDHW
+        return h

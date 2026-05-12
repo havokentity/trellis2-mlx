@@ -334,6 +334,117 @@ def slat_flow_model_from_pt_state_dict(
     return out
 
 
+def _convert_dense_conv3d_weight(pt_w: Any) -> mx.array:
+    """Permute a dense ``nn.Conv3d`` weight from PT NCDHW ``[Co, Ci, Kd, Kh, Kw]``
+    to MLX NDHWC ``[Co, Kd, Kh, Kw, Ci]``.
+    """
+    arr = np.asarray(pt_w)
+    if arr.ndim != 5:
+        raise ValueError(f"expected 5D Conv3d weight; got {arr.shape}")
+    # [Co, Ci, Kd, Kh, Kw] → [Co, Kd, Kh, Kw, Ci]
+    return _to_mx(arr.transpose(0, 2, 3, 4, 1))
+
+
+def ss_decoder_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+    *,
+    num_res_blocks: int = 2,
+    num_res_blocks_middle: int = 2,
+    channels: tuple[int, ...] = (512, 128, 32),
+) -> list[tuple[str, mx.array]]:
+    """Convert the SS-VAE decoder (TRELLIS-1) PT state dict to MLX pairs.
+
+    Upstream layout (numbered by ``blocks.{i}``):
+
+    * Stages 0..N-1 each have ``num_res_blocks`` ResBlock3d + one
+      UpsampleBlock3d (only for non-final stages); the final stage has
+      ``num_res_blocks`` ResBlocks only.
+    * ResBlock has ``norm{1,2}.{weight,bias}`` + ``conv{1,2}.{weight,bias}``.
+    * Upsample has just ``conv.{weight,bias}``.
+    * ``input_layer`` and ``out_layer.2`` are ``nn.Conv3d`` (NCDHW → NDHWC
+      permute).
+    * ``out_layer.0`` is a ``LayerNorm`` (identity copy of weight/bias).
+
+    MLX layout matches PT exactly, except:
+
+    * Conv3d weights are NCDHW→NDHWC permuted at load time.
+    * ``out_layer`` is an ``nn.Sequential`` (LayerNorm, SiLU, Conv3d) so
+      its children are at ``.layers.{0,1,2}`` in MLX vs ``.{0,1,2}`` in
+      PT. We rename ``out_layer.{n}.*`` to ``out_layer.layers.{n}.*``.
+    """
+    out: list[tuple[str, mx.array]] = []
+
+    # input_layer (NCDHW → NDHWC)
+    out.append(
+        ("input_layer.weight", _convert_dense_conv3d_weight(pt_state_dict["input_layer.weight"]))
+    )
+    out.append(("input_layer.bias", _to_mx(pt_state_dict["input_layer.bias"])))
+
+    # middle_block (list of ResBlock3d)
+    for i in range(num_res_blocks_middle):
+        p = f"middle_block.{i}."
+        out.append((p + "norm1.weight", _to_mx(pt_state_dict[p + "norm1.weight"])))
+        out.append((p + "norm1.bias", _to_mx(pt_state_dict[p + "norm1.bias"])))
+        out.append((p + "norm2.weight", _to_mx(pt_state_dict[p + "norm2.weight"])))
+        out.append((p + "norm2.bias", _to_mx(pt_state_dict[p + "norm2.bias"])))
+        out.append(
+            (p + "conv1.weight", _convert_dense_conv3d_weight(pt_state_dict[p + "conv1.weight"]))
+        )
+        out.append((p + "conv1.bias", _to_mx(pt_state_dict[p + "conv1.bias"])))
+        out.append(
+            (p + "conv2.weight", _convert_dense_conv3d_weight(pt_state_dict[p + "conv2.weight"]))
+        )
+        out.append((p + "conv2.bias", _to_mx(pt_state_dict[p + "conv2.bias"])))
+
+    # Stage blocks: per stage, num_res_blocks ResBlock3d then one Upsample
+    # (if not the final stage). Position naming matches upstream's flat
+    # nn.ModuleList accumulation.
+    block_idx = 0
+    for stage_idx in range(len(channels)):
+        for _ in range(num_res_blocks):
+            p = f"blocks.{block_idx}."
+            out.append((p + "norm1.weight", _to_mx(pt_state_dict[p + "norm1.weight"])))
+            out.append((p + "norm1.bias", _to_mx(pt_state_dict[p + "norm1.bias"])))
+            out.append((p + "norm2.weight", _to_mx(pt_state_dict[p + "norm2.weight"])))
+            out.append((p + "norm2.bias", _to_mx(pt_state_dict[p + "norm2.bias"])))
+            out.append(
+                (
+                    p + "conv1.weight",
+                    _convert_dense_conv3d_weight(pt_state_dict[p + "conv1.weight"]),
+                )
+            )
+            out.append((p + "conv1.bias", _to_mx(pt_state_dict[p + "conv1.bias"])))
+            out.append(
+                (
+                    p + "conv2.weight",
+                    _convert_dense_conv3d_weight(pt_state_dict[p + "conv2.weight"]),
+                )
+            )
+            out.append((p + "conv2.bias", _to_mx(pt_state_dict[p + "conv2.bias"])))
+            block_idx += 1
+        # Upsample after each non-final stage.
+        if stage_idx < len(channels) - 1:
+            p = f"blocks.{block_idx}."
+            out.append(
+                (p + "conv.weight", _convert_dense_conv3d_weight(pt_state_dict[p + "conv.weight"]))
+            )
+            out.append((p + "conv.bias", _to_mx(pt_state_dict[p + "conv.bias"])))
+            block_idx += 1
+
+    # out_layer: PT stores as Sequential with bare integer indices; MLX uses `.layers.`.
+    out.append(("out_layer.layers.0.weight", _to_mx(pt_state_dict["out_layer.0.weight"])))
+    out.append(("out_layer.layers.0.bias", _to_mx(pt_state_dict["out_layer.0.bias"])))
+    out.append(
+        (
+            "out_layer.layers.2.weight",
+            _convert_dense_conv3d_weight(pt_state_dict["out_layer.2.weight"]),
+        )
+    )
+    out.append(("out_layer.layers.2.bias", _to_mx(pt_state_dict["out_layer.2.bias"])))
+
+    return out
+
+
 def ss_flow_model_from_pt_state_dict(
     pt_state_dict: Mapping[str, Any],
     *,
