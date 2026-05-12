@@ -37,7 +37,11 @@ import pytest
 import torch
 import torch.nn.functional as F  # noqa: N812 — standard PyTorch alias
 
-from trellis2_mlx.nn.sparse_blocks import SparseConvNeXtBlock3d
+from trellis2_mlx.nn.sparse_blocks import (
+    _CHILD_OFFSETS,
+    SparseConvNeXtBlock3d,
+    sparse_channel_to_spatial,
+)
 from trellis2_mlx.ovoxel.data import build_neighbor_table
 from trellis2_mlx.tests.test_sparse_conv import _brute_force_submconv3, _random_active_set
 from trellis2_mlx.utils.weight_convert import convnext_block_from_pt_state_dict
@@ -249,3 +253,124 @@ def test_convnext_block_real_weights_parity_block_0_1() -> None:
     # converted to fp32: reduction-order drift is the only source of error.
     assert diff.mean() < 5e-4, msg
     assert diff.max() < 5e-3, msg
+
+
+# ── sparse_channel_to_spatial ─────────────────────────────────────────────
+
+
+def test_child_offsets_bit_decomposition() -> None:
+    """Slot k → (z, y, x) = (bit0, bit1, bit2). z is LSB, x is MSB."""
+    assert tuple(_CHILD_OFFSETS[0]) == (0, 0, 0)
+    assert tuple(_CHILD_OFFSETS[1]) == (1, 0, 0)  # z=1
+    assert tuple(_CHILD_OFFSETS[2]) == (0, 1, 0)  # y=1
+    assert tuple(_CHILD_OFFSETS[4]) == (0, 0, 1)  # x=1
+    assert tuple(_CHILD_OFFSETS[7]) == (1, 1, 1)
+
+
+def test_sparse_channel_to_spatial_hand_built() -> None:
+    """Two parents at distinct coords; each subdivides into 2 active children.
+
+    Parent A at (0, 0, 0) with slots 0 and 1 active → fine coords (0, 0, 0) and (1, 0, 0).
+    Parent B at (3, 5, 7) with slots 2 and 7 active → fine coords (6, 11, 14) and (7, 11, 15).
+    """
+    parent_coords = mx.array([[0, 0, 0], [3, 5, 7]], dtype=mx.int32)
+    c_in = 16  # 8 children × 2 channels each
+    # Construct feats so we can verify which slot lands where.
+    # feats[parent, child_slot, channel] = parent * 100 + child_slot * 10 + channel
+    feats_np = np.zeros((2, 8, 2), dtype=np.float32)
+    for p in range(2):
+        for k in range(8):
+            for c in range(2):
+                feats_np[p, k, c] = p * 100 + k * 10 + c
+    feats = mx.array(feats_np.reshape(2, c_in))
+
+    sub = mx.array(
+        [
+            [1, 1, 0, 0, 0, 0, 0, 0],  # parent A: slots 0, 1
+            [0, 0, 1, 0, 0, 0, 0, 1],  # parent B: slots 2, 7
+        ],
+        dtype=mx.int32,
+    ).astype(mx.bool_)
+
+    fine_coords, fine_feats = sparse_channel_to_spatial(parent_coords, feats, sub)
+    fine_coords_np = np.asarray(fine_coords)
+    fine_feats_np = np.asarray(fine_feats)
+
+    assert fine_coords_np.shape == (4, 3)
+    assert fine_feats_np.shape == (4, 2)
+
+    # Parent A: slot 0 → (0,0,0)+(0,0,0)=(0,0,0); slot 1 → (0,0,0)+(1,0,0)=(1,0,0).
+    # Parent B at (3,5,7) × 2 = (6,10,14): slot 2 → (6,11,14); slot 7 → (7,11,15).
+    np.testing.assert_array_equal(
+        fine_coords_np,
+        np.array([[0, 0, 0], [1, 0, 0], [6, 11, 14], [7, 11, 15]], dtype=np.int32),
+    )
+
+    # Feature checks: feats[p, k, c] = 100p + 10k + c
+    np.testing.assert_array_equal(fine_feats_np[0], [0, 1])  # A slot 0
+    np.testing.assert_array_equal(fine_feats_np[1], [10, 11])  # A slot 1
+    np.testing.assert_array_equal(fine_feats_np[2], [120, 121])  # B slot 2
+    np.testing.assert_array_equal(fine_feats_np[3], [170, 171])  # B slot 7
+
+
+def test_sparse_channel_to_spatial_empty_subdivision() -> None:
+    """No active children → degenerate empty fine grid."""
+    parent_coords = mx.array([[0, 0, 0], [1, 1, 1]], dtype=mx.int32)
+    feats = mx.zeros((2, 16))
+    sub = mx.zeros((2, 8), dtype=mx.bool_)
+    fc, ff = sparse_channel_to_spatial(parent_coords, feats, sub)
+    assert tuple(fc.shape) == (0, 3)
+    assert tuple(ff.shape) == (0, 2)
+
+
+def test_sparse_channel_to_spatial_validates_shapes() -> None:
+    # feats channel count not divisible by 8
+    with pytest.raises(ValueError, match="divisible by 8"):
+        sparse_channel_to_spatial(
+            mx.zeros((1, 3), dtype=mx.int32),
+            mx.zeros((1, 15)),
+            mx.zeros((1, 8), dtype=mx.bool_),
+        )
+    # subdivision shape mismatch
+    with pytest.raises(ValueError, match=r"subdivision must be \[L_coarse, 8\]"):
+        sparse_channel_to_spatial(
+            mx.zeros((2, 3), dtype=mx.int32),
+            mx.zeros((2, 16)),
+            mx.zeros((2, 7), dtype=mx.bool_),
+        )
+
+
+@pytest.mark.parametrize("seed", [0, 1, 42])
+def test_sparse_channel_to_spatial_brute_force_parity(seed: int) -> None:
+    """Random parents + random subdivision masks; brute-force enumeration."""
+    rng = np.random.default_rng(seed)
+    n_coarse = 50
+    c_out = 4
+    c_in = 8 * c_out
+
+    parent_coords_np = rng.integers(0, 16, size=(n_coarse, 3), dtype=np.int32)
+    feats_np = rng.standard_normal((n_coarse, c_in)).astype(np.float32)
+    sub_np = rng.integers(0, 2, size=(n_coarse, 8), dtype=np.int32).astype(bool)
+
+    fc, ff = sparse_channel_to_spatial(
+        mx.array(parent_coords_np),
+        mx.array(feats_np),
+        mx.array(sub_np),
+    )
+    fc_np = np.asarray(fc)
+    ff_np = np.asarray(ff)
+
+    # Brute-force expectation
+    exp_coords: list[np.ndarray] = []
+    exp_feats: list[np.ndarray] = []
+    for p in range(n_coarse):
+        for k in range(8):
+            if sub_np[p, k]:
+                child_offset = np.array([k & 1, (k >> 1) & 1, (k >> 2) & 1], dtype=np.int32)
+                exp_coords.append(parent_coords_np[p] * 2 + child_offset)
+                exp_feats.append(feats_np[p].reshape(8, c_out)[k])
+    exp_coords_arr = np.stack(exp_coords) if exp_coords else np.zeros((0, 3), np.int32)
+    exp_feats_arr = np.stack(exp_feats) if exp_feats else np.zeros((0, c_out), np.float32)
+
+    np.testing.assert_array_equal(fc_np, exp_coords_arr)
+    np.testing.assert_allclose(ff_np, exp_feats_arr, atol=0, rtol=0)
