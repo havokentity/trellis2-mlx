@@ -154,12 +154,17 @@ def _safetensors_read(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
 
 
 def _safetensors_load_keys(path: Path, keys: list[str]) -> dict[str, np.ndarray]:
-    """Load a small subset of tensors from a safetensors file as numpy arrays."""
+    """Load a small subset of tensors from a safetensors file as numpy arrays.
+
+    BF16 tensors are promoted to fp32 (numpy has no native bf16 — we read the
+    raw uint16 buffer, left-shift by 16 into uint32, then reinterpret as
+    fp32). For DiT-block parity tests this is the right behaviour: we want
+    fp32 reference values regardless of the on-disk dtype.
+    """
     header, data_start = _safetensors_read(path)
     out: dict[str, np.ndarray] = {}
     dtype_map = {
         "F16": np.float16,
-        "BF16": None,
         "F32": np.float32,
         "F64": np.float64,
         "I8": np.int8,
@@ -176,13 +181,20 @@ def _safetensors_load_keys(path: Path, keys: list[str]) -> dict[str, np.ndarray]
             if k not in header:
                 raise KeyError(f"{k} not in {path}")
             info = header[k]
-            dt = dtype_map.get(info["dtype"])
-            if dt is None:
-                raise ValueError(f"unsupported dtype {info['dtype']} for {k}")
             start, end = info["data_offsets"]
             f.seek(data_start + start)
             buf = f.read(end - start)
-            out[k] = np.frombuffer(buf, dtype=dt).reshape(info["shape"]).copy()
+            if info["dtype"] == "BF16":
+                # BF16 → FP32: pad uint16 with 16 zero bits at the low end,
+                # reinterpret as fp32. Standard bit-trick.
+                raw = np.frombuffer(buf, dtype=np.uint16).astype(np.uint32) << 16
+                arr = raw.view(np.float32).reshape(info["shape"]).copy()
+            else:
+                dt = dtype_map.get(info["dtype"])
+                if dt is None:
+                    raise ValueError(f"unsupported dtype {info['dtype']} for {k}")
+                arr = np.frombuffer(buf, dtype=dt).reshape(info["shape"]).copy()
+            out[k] = arr
     return out
 
 

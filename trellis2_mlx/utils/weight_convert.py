@@ -203,6 +203,65 @@ def c2s_upsample_block_from_pt_state_dict(
     return list(out.items())
 
 
+def dit_block_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+) -> list[tuple[str, mx.array]]:
+    """Convert one DiT block's PT state dict to MLX param pairs.
+
+    All keys map verbatim except the FFN ``nn.Sequential``: upstream stores
+    it under ``mlp.mlp.{0,2}.{weight,bias}`` (outer ``SparseFeedForwardNet``
+    wraps an inner ``nn.Sequential``); our :class:`~trellis2_mlx.nn.dit_block.ModulatedDiTCrossBlock`
+    drops the outer wrapper, so MLX paths are ``mlp.layers.{0,2}.{weight,bias}``.
+
+    Expected upstream keys (per ``blocks.{i}.*``):
+
+    * ``modulation`` ``[6*C]``
+    * ``norm2.{weight,bias}`` ``[C]``  (affine; norm1 / norm3 have no params)
+    * ``self_attn.to_qkv.{weight,bias}`` ``[3*C, C]`` / ``[3*C]``
+    * ``self_attn.to_out.{weight,bias}`` ``[C, C]`` / ``[C]``
+    * ``self_attn.{q,k}_rms_norm.gamma`` ``[H, head_dim]``
+    * ``cross_attn.to_q.{weight,bias}`` ``[C, C]`` / ``[C]``
+    * ``cross_attn.to_kv.{weight,bias}`` ``[2*C, ctx_C]`` / ``[2*C]``
+    * ``cross_attn.to_out.{weight,bias}``
+    * ``cross_attn.{q,k}_rms_norm.gamma``
+    * ``mlp.mlp.0.{weight,bias}`` ``[intermediate, C]`` / ``[intermediate]``
+    * ``mlp.mlp.2.{weight,bias}`` ``[C, intermediate]`` / ``[C]``
+    """
+    out: list[tuple[str, mx.array]] = []
+    rename_pairs = [
+        ("mlp.mlp.0.weight", "mlp.layers.0.weight"),
+        ("mlp.mlp.0.bias", "mlp.layers.0.bias"),
+        ("mlp.mlp.2.weight", "mlp.layers.2.weight"),
+        ("mlp.mlp.2.bias", "mlp.layers.2.bias"),
+    ]
+    direct_keys = [
+        "modulation",
+        "norm2.weight",
+        "norm2.bias",
+        "self_attn.to_qkv.weight",
+        "self_attn.to_qkv.bias",
+        "self_attn.to_out.weight",
+        "self_attn.to_out.bias",
+        "self_attn.q_rms_norm.gamma",
+        "self_attn.k_rms_norm.gamma",
+        "cross_attn.to_q.weight",
+        "cross_attn.to_q.bias",
+        "cross_attn.to_kv.weight",
+        "cross_attn.to_kv.bias",
+        "cross_attn.to_out.weight",
+        "cross_attn.to_out.bias",
+        "cross_attn.q_rms_norm.gamma",
+        "cross_attn.k_rms_norm.gamma",
+    ]
+    for k in direct_keys:
+        if k in pt_state_dict:
+            out.append((k, _to_mx(pt_state_dict[k])))
+    for pt_k, mlx_k in rename_pairs:
+        if pt_k in pt_state_dict:
+            out.append((mlx_k, _to_mx(pt_state_dict[pt_k])))
+    return out
+
+
 def shape_decoder_from_pt_state_dict(
     pt_state_dict: Mapping[str, Any],
     *,
