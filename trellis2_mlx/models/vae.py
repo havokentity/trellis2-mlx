@@ -258,7 +258,13 @@ def _pixel_shuffle_3d_ndhwc(x: mx.array) -> mx.array:
     """3D pixel shuffle (factor=2) on an NDHWC tensor.
 
     Mirrors ``reference/microsoft-trellis2/trellis2/modules/spatial.py:pixel_shuffle_3d``
-    but in NDHWC layout (MLX native):
+    EXACTLY: input channel index ``j`` is laid out as
+    ``j = 8 * c_ + 4 * kd + 2 * kh + kw``, with ``c_`` *slowest*. That means
+    the reshape must split the ``C*8`` dim into ``[C, 2, 2, 2]`` (C slowest),
+    NOT ``[2, 2, 2, C]`` (C fastest). The trained SS-VAE conv1 weights were
+    learnt with upstream's slot ordering — any other ordering misroutes the
+    channels to the wrong spatial positions and the decoder produces
+    garbage (positives almost everywhere).
 
     ``[B, D, H, W, C*8] → [B, 2D, 2H, 2W, C]``.
     """
@@ -266,15 +272,13 @@ def _pixel_shuffle_3d_ndhwc(x: mx.array) -> mx.array:
     if c8 % 8 != 0:
         raise ValueError(f"channels must be divisible by 8 for ×2 pixel-shuffle; got {c8}")
     c = c8 // 8
-    # Reshape last dim into (2, 2, 2, C); then interleave with spatial axes.
-    # NCDHW pattern (upstream): permute(0, 1, 5, 2, 6, 3, 7, 4) — but in NDHWC
-    # the channel axis is at position 4, so we adapt to NDHWC.
-    # x: [B, D, H, W, 2_d, 2_h, 2_w, C]
-    x = x.reshape(b, d, h, w, 2, 2, 2, c)
-    # Re-interleave so neighbours in (kd, kh, kw) sit next to (D, H, W) and
-    # the trailing dim is just C.
-    # Permute target: [B, D, kd, H, kh, W, kw, C] = (0, 1, 4, 2, 5, 3, 6, 7)
-    x = x.transpose(0, 1, 4, 2, 5, 3, 6, 7)
+    # Reshape: C dim splits as [C, 2, 2, 2] — c_ slowest, kw fastest (matches
+    # upstream's [C_, 2, 2, 2] split).
+    x = x.reshape(b, d, h, w, c, 2, 2, 2)
+    # Permute to interleave kernel dims with spatial dims and put C last:
+    # current positions: [b, d, h, w, c, kd, kh, kw] = [0, 1, 2, 3, 4, 5, 6, 7]
+    # target:            [b, d, kd, h, kh, w, kw, c] = [0, 1, 5, 2, 6, 3, 7, 4]
+    x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)
     return x.reshape(b, d * 2, h * 2, w * 2, c)
 
 

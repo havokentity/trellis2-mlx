@@ -99,3 +99,35 @@ def test_ss_decoder_loads_and_runs_smoke(
         f"range=[{out_np.min():.3f}, {out_np.max():.3f}]  "
         f">0 fraction={positives:.3f}"
     )
+
+
+def test_ss_decoder_zero_latent_is_mostly_empty(
+    ss_decoder_state: dict[str, np.ndarray],
+) -> None:
+    """A zero SS latent must decode to an essentially-empty occupancy.
+
+    Regression test for a layout bug in the pixel-shuffle channel ordering
+    (the trained conv1 emits 8 channel slots per output voxel in the order
+    ``j = 8 * c_ + 4 * kd + 2 * kh + kw`` with ``c_`` slowest; if the
+    decoder reshapes those slots in any other order, channels land at the
+    wrong spatial positions and the network outputs ~80% positive logits
+    on **any** input — including zeros, where a trained VAE decoder should
+    produce a uniformly empty field).
+
+    Concretely: with the bug, ``(out > 0).mean()`` was ~0.78. After the
+    fix it drops to 0.0. The threshold below is loose enough to never
+    catch real model behaviour but tight enough to immediately catch the
+    layout bug if it regresses.
+    """
+    model = SparseStructureDecoder(SparseStructureDecoderConfig())
+    model.load_weights(ss_decoder_from_pt_state_dict(ss_decoder_state))
+
+    z = mx.zeros((1, model.cfg.latent_channels, 16, 16, 16))
+    out = model(z)
+    mx.eval(out)
+    pos_fraction = float((np.asarray(out) > 0).mean())
+    assert pos_fraction < 0.10, (
+        f"zero-latent SS decoder produced {pos_fraction:.3f} positive voxels — "
+        "trained decoder should output essentially-empty occupancy on zero input "
+        "(pixel-shuffle channel-layout regression?)"
+    )
