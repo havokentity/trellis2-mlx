@@ -28,6 +28,7 @@ decoder is end-to-end-validated.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -51,6 +52,10 @@ class ShapeDecoderConfig:
     num_blocks: tuple[int, ...] = (4, 16, 8, 4, 0)
     mlp_ratio: float = 4.0
     voxel_margin: float = 0.5
+    # When True (shape decoder default) each upsample block predicts its own
+    # subdivision mask. When False (material decoder), the upsamples take the
+    # mask from ``guide_subs`` and don't carry a ``to_subdiv`` Linear.
+    pred_subdiv: bool = True
 
 
 @dataclass
@@ -120,6 +125,7 @@ class ShapeDecoder(nn.Module):
                     SparseResBlockC2S3d(
                         c.model_channels[stage_idx],
                         c.model_channels[stage_idx + 1],
+                        pred_subdiv=c.pred_subdiv,
                     )
                 )
             self.blocks.append(stage)
@@ -127,30 +133,20 @@ class ShapeDecoder(nn.Module):
         # Final per-voxel Linear → 7-channel head.
         self.output_layer = nn.Linear(c.model_channels[-1], c.out_channels, bias=True)
 
-    def __call__(
+    def _forward_raw(
         self,
         latent_feats: mx.array,
         coords: mx.array,
         coarse_resolution: int,
         *,
-        guide_subs: list[mx.array | None] | None = None,
-    ) -> ShapeDecoderOutput:
-        """Decode a latent O-Voxel into shape outputs.
+        guide_subs: Sequence[mx.array | None] | None = None,
+    ) -> tuple[mx.array, mx.array, int, list[mx.array]]:
+        """Run the backbone up to the output Linear. Returns
+        ``(raw_output, fine_coords, output_resolution, subdiv_logits_per_stage)``.
 
-        Parameters
-        ----------
-        latent_feats : mx.array
-            ``[L_coarse, latent_channels]`` per-active-voxel latents from the
-            SLAT DiT.
-        coords : mx.array
-            ``[L_coarse, 3]`` int latent-grid coordinates.
-        coarse_resolution : int
-            Resolution of the latent grid (32 for 512³ output, 64 for 1024³).
-        guide_subs : list of mx.array or None
-            Optional ``[stages-1]`` list of pre-computed subdivision masks
-            (one per upsample). When ``None`` (default), each upsample
-            predicts its own from the features. Used by the material decoder
-            in upstream to inherit the shape decoder's pruning structure.
+        Shared between shape and material paths — the only difference is what
+        the caller does with ``raw_output`` (split into v/δ/γ for shape, into
+        c/m/r/α for material).
         """
         if guide_subs is not None and len(guide_subs) != len(self.blocks) - 1:
             raise ValueError(
@@ -191,7 +187,25 @@ class ShapeDecoder(nn.Module):
         # Final parameter-free LayerNorm + Linear head.
         h = mx.fast.layer_norm(h, weight=None, bias=None, eps=1e-5)
         h = self.output_layer(h)
+        return h, coords, resolution, subdiv_logits_per_stage
 
+    def __call__(
+        self,
+        latent_feats: mx.array,
+        coords: mx.array,
+        coarse_resolution: int,
+        *,
+        guide_subs: Sequence[mx.array | None] | None = None,
+    ) -> ShapeDecoderOutput:
+        """Decode a latent O-Voxel into shape outputs ``(v, δ, γ)``."""
+        h, coords, resolution, subdiv_logits_per_stage = self._forward_raw(
+            latent_feats, coords, coarse_resolution, guide_subs=guide_subs
+        )
+        if h.shape[1] < 7:
+            raise ValueError(
+                f"ShapeDecoder.__call__ expects 7-channel output; got {h.shape[1]} channels. "
+                "(Did you mean to use MaterialDecoder?)"
+            )
         # Split the 7-channel head into (v, δ, γ) per fdg_vae.py:97-102.
         eps = self.cfg.voxel_margin
         v = (1.0 + 2.0 * eps) * mx.sigmoid(h[:, 0:3]) - eps
@@ -217,21 +231,135 @@ class SCVAEEncoder(nn.Module):
         raise NotImplementedError("SCVAEEncoder lands when fine-tuning support is wired up")
 
 
-class SCVAEMaterialDecoder(nn.Module):
-    """Material decoder producing per-active-voxel ``(c, m, r, α)``.
+@dataclass(frozen=True)
+class MaterialDecoderConfig:
+    """Static config for the SC-VAE material (texture) decoder.
 
-    Same architecture as :class:`ShapeDecoder` but with ``out_channels=6`` and
-    ``guide_subs`` provided by the shape decoder so geometry and material
-    share the same active set.
-
-    Will be implemented once the shape decoder is end-to-end-validated; the
-    block-level parity tests already cover the shared SubMConv3 / ConvNeXt /
-    C2S internals.
+    Matches ``tex_dec_next_dc_f16c32_fp16.safetensors`` (a sibling of the
+    shape decoder with the same backbone but different output head and no
+    learned subdivision predictor — material inherits the shape's
+    pruning structure via ``guide_subs``).
     """
 
-    def __init__(self) -> None:
+    latent_channels: int = 32
+    out_channels: int = 6  # (c[3], m, r, α)
+    model_channels: tuple[int, ...] = (1024, 512, 256, 128, 64)
+    num_blocks: tuple[int, ...] = (4, 16, 8, 4, 0)
+    mlp_ratio: float = 4.0
+
+
+@dataclass
+class MaterialDecoderOutput:
+    """Decoded per-voxel material fields (``c, m, r, α``) in ``[0, 1]``.
+
+    Attributes
+    ----------
+    coords : mx.array
+        ``[L_fine, 3]`` int output-resolution voxel coords. **Identical** to
+        the shape decoder's ``coords`` because the material decoder
+        consumes the shape decoder's subdivision masks via ``guide_subs``.
+    base_color : mx.array
+        ``[L_fine, 3]`` linear-space RGB in ``[0, 1]``.
+    metallic : mx.array
+        ``[L_fine, 1]`` in ``[0, 1]``.
+    roughness : mx.array
+        ``[L_fine, 1]`` in ``[0, 1]``.
+    alpha : mx.array
+        ``[L_fine, 1]`` in ``[0, 1]``.
+    output_resolution : int
+    """
+
+    coords: mx.array
+    base_color: mx.array
+    metallic: mx.array
+    roughness: mx.array
+    alpha: mx.array
+    output_resolution: int
+
+
+class MaterialDecoder(nn.Module):
+    """SC-VAE material decoder — sibling of :class:`ShapeDecoder`.
+
+    Same backbone (same channels, same block counts, same mlp_ratio) but:
+
+    * ``out_channels = 6`` (``c[3], m, r, α``) instead of 7.
+    * Upsample blocks have **no** learned subdivision predictor — they
+      consume the shape decoder's ``subdiv_logits`` per stage so the
+      material output is spatially aligned with the geometry.
+    * Final output is run through ``× 0.5 + 0.5`` to map from the
+      learned ``[-1, 1]`` range into ``[0, 1]`` for PBR channel use
+      (matches ``trellis2_image_to_3d.py:450``).
+
+    Internally we instantiate a :class:`ShapeDecoder` with the right
+    config (``pred_subdiv=False``, ``out_channels=6``) and post-process its
+    raw output. Keeping the same backbone class means the per-block parity
+    tests we already have for ConvNeXt and C2S still cover this decoder.
+    """
+
+    def __init__(self, cfg: MaterialDecoderConfig | None = None) -> None:
         super().__init__()
-        raise NotImplementedError("SCVAEMaterialDecoder lands after shape-decoder smoke test")
+        self.cfg = cfg or MaterialDecoderConfig()
+        # Reuse the ShapeDecoder backbone with material-specific tweaks.
+        backbone_cfg = ShapeDecoderConfig(
+            latent_channels=self.cfg.latent_channels,
+            out_channels=self.cfg.out_channels,
+            model_channels=self.cfg.model_channels,
+            num_blocks=self.cfg.num_blocks,
+            mlp_ratio=self.cfg.mlp_ratio,
+            pred_subdiv=False,  # material inherits shape's subdivision
+        )
+        self.backbone = ShapeDecoder(backbone_cfg)
+
+    def __call__(
+        self,
+        latent_feats: mx.array,
+        coords: mx.array,
+        coarse_resolution: int,
+        guide_subs: list[mx.array],
+    ) -> MaterialDecoderOutput:
+        """Decode a material latent on the shape decoder's active set.
+
+        Parameters
+        ----------
+        latent_feats : mx.array
+            ``[L_coarse, latent_channels]`` per-voxel material latent from
+            the texture SLAT DiT.
+        coords : mx.array
+            ``[L_coarse, 3]`` parent coordinates at the SLAT resolution.
+        coarse_resolution : int
+            32 for 512³ output / 64 for 1024³.
+        guide_subs : list of mx.array
+            Per-upsample ``[L_coarse_i, 8]`` boolean subdivision masks
+            taken from the shape decoder. Required — without them the
+            material decoder has nothing to drive its upsamples.
+        """
+        if len(guide_subs) != len(self.cfg.num_blocks) - 1:
+            raise ValueError(
+                f"guide_subs must have length {len(self.cfg.num_blocks) - 1}, got {len(guide_subs)}"
+            )
+        raw, fine_coords, output_resolution, _ = self.backbone._forward_raw(
+            latent_feats, coords, coarse_resolution, guide_subs=guide_subs
+        )
+        # Upstream applies `* 0.5 + 0.5` to map [-1, 1] → [0, 1] — see
+        # ``trellis2_image_to_3d.py:450``: ``ret * 0.5 + 0.5``.
+        scaled = raw * 0.5 + 0.5
+        # Channel layout (matches pipeline.py:73-78 pbr_attr_layout):
+        #   slots 0:3 → base color (RGB)
+        #   slot 3     → metallic
+        #   slot 4     → roughness
+        #   slot 5     → alpha
+        base_color = mx.clip(scaled[:, 0:3], 0.0, 1.0)
+        metallic = mx.clip(scaled[:, 3:4], 0.0, 1.0)
+        roughness = mx.clip(scaled[:, 4:5], 0.0, 1.0)
+        alpha = mx.clip(scaled[:, 5:6], 0.0, 1.0)
+        return MaterialDecoderOutput(
+            coords=fine_coords,
+            base_color=base_color,
+            metallic=metallic,
+            roughness=roughness,
+            alpha=alpha,
+            output_resolution=output_resolution,
+        )
 
 
 # ── SS-VAE decoder (dense; from microsoft/TRELLIS-image-large) ───────────

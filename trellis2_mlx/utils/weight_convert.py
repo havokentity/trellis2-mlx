@@ -191,8 +191,6 @@ def c2s_upsample_block_from_pt_state_dict(
     Output is suitable for ``SparseResBlockC2S3d.load_weights(...)``.
     """
     out: dict[str, mx.array] = {
-        "to_subdiv.weight": _to_mx(pt_state_dict["to_subdiv.weight"]),
-        "to_subdiv.bias": _to_mx(pt_state_dict["to_subdiv.bias"]),
         "norm1.weight": _to_mx(pt_state_dict["norm1.weight"]),
         "norm1.bias": _to_mx(pt_state_dict["norm1.bias"]),
         "conv1_weight": _convert_sparse_conv3d_weight(pt_state_dict["conv1.weight"]),
@@ -200,6 +198,11 @@ def c2s_upsample_block_from_pt_state_dict(
         "conv2_weight": _convert_sparse_conv3d_weight(pt_state_dict["conv2.weight"]),
         "conv2_bias": _to_mx(pt_state_dict["conv2.bias"]),
     }
+    # `to_subdiv` is absent in the material decoder (pred_subdiv=False). The
+    # shape decoder has these keys; the texture decoder does not.
+    if "to_subdiv.weight" in pt_state_dict:
+        out["to_subdiv.weight"] = _to_mx(pt_state_dict["to_subdiv.weight"])
+        out["to_subdiv.bias"] = _to_mx(pt_state_dict["to_subdiv.bias"])
     return list(out.items())
 
 
@@ -522,6 +525,56 @@ def shape_decoder_from_pt_state_dict(
                 out.append((prefix_mlx + sub_name, arr))
 
     return out
+
+
+def material_decoder_from_pt_state_dict(
+    pt_state_dict: Mapping[str, Any],
+    *,
+    num_blocks: tuple[int, ...] = (4, 16, 8, 4, 0),
+) -> list[tuple[str, mx.array]]:
+    """Convert the SC-VAE *material* decoder PT state dict to MLX param pairs.
+
+    Same structure as ``shape_decoder_from_pt_state_dict`` but:
+
+    * Output layer is ``[6, 64]`` instead of ``[7, 64]``.
+    * Upsample blocks have **no** ``to_subdiv.{weight, bias}`` keys
+      (material inherits subdivision from the shape decoder).
+    * Every MLX path is prefixed with ``backbone.`` because our
+      :class:`~trellis2_mlx.models.vae.MaterialDecoder` embeds a
+      :class:`~trellis2_mlx.models.vae.ShapeDecoder` under ``self.backbone``.
+    """
+    # Build the inner-shape-decoder-style pairs first…
+    inner: list[tuple[str, mx.array]] = []
+    inner.append(("from_latent.weight", _to_mx(pt_state_dict["from_latent.weight"])))
+    inner.append(("from_latent.bias", _to_mx(pt_state_dict["from_latent.bias"])))
+    inner.append(("output_layer.weight", _to_mx(pt_state_dict["output_layer.weight"])))
+    inner.append(("output_layer.bias", _to_mx(pt_state_dict["output_layer.bias"])))
+    for stage_idx, n_convnext in enumerate(num_blocks):
+        for block_idx in range(n_convnext):
+            prefix_pt = f"blocks.{stage_idx}.{block_idx}."
+            block_state = {
+                k[len(prefix_pt) :]: v for k, v in pt_state_dict.items() if k.startswith(prefix_pt)
+            }
+            for sub_name, arr in convnext_block_from_pt_state_dict(block_state):
+                inner.append((prefix_pt + sub_name, arr))
+        if stage_idx < len(num_blocks) - 1:
+            up_idx = n_convnext
+            prefix_pt = f"blocks.{stage_idx}.{up_idx}."
+            block_state = {
+                k[len(prefix_pt) :]: v for k, v in pt_state_dict.items() if k.startswith(prefix_pt)
+            }
+            # The material decoder's upsample block has no to_subdiv — re-use
+            # the C2S converter, which already skips missing keys, then drop
+            # any keys it generated for to_subdiv (none, since they're absent
+            # from the input state dict, but the loop is robust either way).
+            for sub_name, arr in c2s_upsample_block_from_pt_state_dict(block_state):
+                if sub_name.startswith("to_subdiv."):
+                    continue
+                inner.append((prefix_pt + sub_name, arr))
+
+    # …then prefix everything with ``backbone.`` so it lands inside
+    # ``MaterialDecoder.backbone`` (a ShapeDecoder instance).
+    return [(f"backbone.{k}", v) for k, v in inner]
 
 
 def convert_checkpoint(src_dir: str | Path, dst_dir: str | Path) -> None:

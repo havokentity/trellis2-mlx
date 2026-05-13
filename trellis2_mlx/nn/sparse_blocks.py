@@ -210,14 +210,29 @@ class SparseResBlockC2S3d(nn.Module):
         Coarse-side channel count. Must be divisible by 8.
     out_channels : int
         Fine-side channel count.
+    pred_subdiv : bool
+        When ``True`` (default), the block predicts its own subdivision
+        mask via a learned ``to_subdiv`` Linear. When ``False``, the
+        ``to_subdiv`` layer is **not** allocated (its weights are absent
+        from the checkpoint, matching the published material decoder),
+        and the caller must pass an explicit ``subdivision=...`` to
+        ``__call__``. The material decoder uses ``pred_subdiv=False`` so
+        it inherits the shape decoder's pruning decisions exactly.
     """
 
-    def __init__(self, in_channels: int, out_channels: int) -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        pred_subdiv: bool = True,
+    ) -> None:
         super().__init__()
         if in_channels % 8 != 0:
             raise ValueError(f"in_channels ({in_channels}) must be divisible by 8")
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.pred_subdiv = pred_subdiv
 
         # Skip-connection channel-repeat factor — see step 6 of the docstring.
         # After channel_to_spatial(x, subdiv), x is (L_f, in_channels // 8).
@@ -231,8 +246,10 @@ class SparseResBlockC2S3d(nn.Module):
             )
         self.skip_repeat = skip_repeat
 
-        # Subdivision predictor: Linear(in_channels → 8).
-        self.to_subdiv = nn.Linear(in_channels, 8, bias=True)
+        # Subdivision predictor: Linear(in_channels → 8). Only allocated
+        # when this block is responsible for predicting its own mask.
+        if pred_subdiv:
+            self.to_subdiv = nn.Linear(in_channels, 8, bias=True)
 
         # Coarse-side norm + conv (expands channels by 8 to feed the upsample).
         self.norm1 = nn.LayerNorm(in_channels, eps=1e-6, affine=True)
@@ -288,10 +305,19 @@ class SparseResBlockC2S3d(nn.Module):
         subdiv_logits : mx.array
             ``[L_coarse, 8]`` raw subdivision logits (for training loss).
         """
-        # 1. Predict subdivision (always computed for training; threshold at logit 0).
-        subdiv_logits = self.to_subdiv(x)
-        if subdivision is None:
-            subdivision = subdiv_logits > 0
+        # 1. Predict subdivision (when allowed) or use the caller-supplied mask.
+        if self.pred_subdiv:
+            subdiv_logits = self.to_subdiv(x)
+            if subdivision is None:
+                subdivision = subdiv_logits > 0
+        else:
+            if subdivision is None:
+                raise ValueError(
+                    "pred_subdiv=False block requires an explicit `subdivision=` "
+                    "(the material decoder receives this from the shape decoder's "
+                    "subdiv_logits per stage)"
+                )
+            subdiv_logits = mx.zeros((coords_coarse.shape[0], 8), dtype=x.dtype)
 
         # 2. Coarse path: norm1 + silu + conv1 → [L_c, out_channels * 8]
         h = nn.silu(self.norm1(x))
