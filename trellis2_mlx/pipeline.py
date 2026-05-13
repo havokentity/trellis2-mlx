@@ -595,10 +595,15 @@ class Trellis2ImageTo3DPipeline:
 
         rng = np.random.default_rng(self.cfg.seed if seed is None else seed)
 
+        # Total stages in the progress prefix — 7 when texture is on
+        # (DINOv3, SS-DiT, SS-VAE, shape-SLAT, SC-VAE shape, tex-SLAT, material),
+        # 5 when off (no tex-SLAT / material).
+        total = 7 if self.cfg.with_texture else 5
+
         # 1. Image conditioning. clear_cache() between every stage frees any
         # transient MLX buffers and keeps peak GPU memory near the stage's
         # working set rather than the cumulative sum.
-        print("  [1/5] DINOv3 encoding ...", flush=True, file=sys.stderr)
+        print(f"  [1/{total}] DINOv3 encoding ...", flush=True, file=sys.stderr)
         cond = self._encode_image(image)
         mx.eval(cond)
         mx.clear_cache()
@@ -607,14 +612,16 @@ class Trellis2ImageTo3DPipeline:
 
         # 2. Sample SS latent
         print(
-            "  [2/5] SS-DiT sampling (12 steps × 2 CFG branches) ...", flush=True, file=sys.stderr
+            f"  [2/{total}] SS-DiT sampling (12 steps × 2 CFG branches) ...",
+            flush=True,
+            file=sys.stderr,
         )
         z_s = self._sample_ss_latent(cond, neg_cond, rng)
         mx.eval(z_s)
         mx.clear_cache()
 
         # 3. SS-VAE decode → active coords
-        print("  [3/5] SS-VAE decoder + maxpool ...", flush=True, file=sys.stderr)
+        print(f"  [3/{total}] SS-VAE decoder + maxpool ...", flush=True, file=sys.stderr)
         coords = self._decode_ss_latent(z_s)
         mx.eval(coords)
         mx.clear_cache()
@@ -627,7 +634,7 @@ class Trellis2ImageTo3DPipeline:
         # 4. Sample shape SLAT (with cascade branch if requested)
         if self._is_cascade:
             print(
-                f"  [4/5] SLAT-shape DiT cascade ({self.cfg.pipeline_type}): "
+                f"  [4/{total}] SLAT-shape DiT cascade ({self.cfg.pipeline_type}): "
                 f"LR on {coords.shape[0]} voxels → upsample → HR ...",
                 flush=True,
                 file=sys.stderr,
@@ -636,7 +643,7 @@ class Trellis2ImageTo3DPipeline:
             slat_coarse_resolution = self._hr_slat_res
         else:
             print(
-                f"  [4/5] SLAT-shape DiT sampling on {coords.shape[0]} voxels ...",
+                f"  [4/{total}] SLAT-shape DiT sampling on {coords.shape[0]} voxels ...",
                 flush=True,
                 file=sys.stderr,
             )
@@ -651,9 +658,8 @@ class Trellis2ImageTo3DPipeline:
         mx.clear_cache()
 
         # 5. SC-VAE shape decoder
-        n_steps = "5/7" if self.cfg.with_texture else "5/5"
         print(
-            f"  [{n_steps}] SC-VAE shape decoder + mesh extraction "
+            f"  [5/{total}] SC-VAE shape decoder + mesh extraction "
             f"(coarse_res={slat_coarse_resolution}, output_res={slat_coarse_resolution * 16}) ...",
             flush=True,
             file=sys.stderr,
