@@ -167,6 +167,7 @@ def bake_uv_atlas(
     *,
     metallic: np.ndarray | None = None,
     roughness: np.ndarray | None = None,
+    max_atlas_faces: int = 150_000,
     verbose: bool = False,
 ) -> dict[str, np.ndarray]:
     """UV-unwrap + per-pixel bake.
@@ -213,13 +214,71 @@ def bake_uv_atlas(
     if verbose:
         print(f"  UV unwrap input: V={n_in_verts:,}  F={n_in_faces:,}")
 
+    # xatlas time scales superlinearly with face count and uses limited
+    # internal parallelism (~3 cores on M4 Max). To keep UV-atlas runs
+    # bounded we auto-cap the input mesh via a clustering decimation
+    # pass — at typical atlas resolutions (1024-4096²) the per-pixel
+    # detail saturates well below 200k faces anyway, so the visual loss
+    # is small. Pass ``max_atlas_faces=None`` (or a much larger value)
+    # to disable.
+    if max_atlas_faces is not None and n_in_faces > max_atlas_faces:
+        if verbose:
+            print(
+                f"  ⚠  {n_in_faces:,} faces > UV-atlas cap of {max_atlas_faces:,}; "
+                "pre-decimating to keep xatlas tractable"
+            )
+        import math
+
+        import pymeshlab as ml
+
+        ms_cap = ml.MeshSet()
+        v64 = np.ascontiguousarray(vertices, dtype=np.float64)
+        f32 = np.ascontiguousarray(faces, dtype=np.int32)
+        if vertex_colors.shape[1] == 3:
+            colors_rgba = np.concatenate(
+                [vertex_colors, np.full((n_in_verts, 1), 255, dtype=np.uint8)], axis=1
+            )
+        else:
+            colors_rgba = vertex_colors.astype(np.uint8)
+        c64 = np.ascontiguousarray(colors_rgba, dtype=np.float64) / 255.0
+        ms_cap.add_mesh(ml.Mesh(vertex_matrix=v64, face_matrix=f32, v_color_matrix=c64))
+        # Use clustering for guaranteed reduction. Threshold heuristic
+        # matches the fallback path in repair.py.
+        threshold_pct = math.sqrt(6.0 / max_atlas_faces) * 100
+        threshold_pct = max(0.05, min(threshold_pct, 5.0))
+        import contextlib
+        with contextlib.suppress(Exception):
+            ms_cap.meshing_decimation_clustering(threshold=ml.PercentageValue(threshold_pct))
+        mm = ms_cap.current_mesh()
+        vertices = np.ascontiguousarray(mm.vertex_matrix(), dtype=np.float32)
+        faces = np.ascontiguousarray(mm.face_matrix(), dtype=np.int32)
+        c01 = mm.vertex_color_matrix()
+        vertex_colors = (np.clip(c01, 0.0, 1.0) * 255.0).astype(np.uint8)
+        if metallic is not None or roughness is not None:
+            # Clustering changed vertex IDs so we can no longer index the
+            # original M/R arrays. Drop them with a warning rather than
+            # add a scipy dep for the nearest-neighbor map. Base color
+            # was preserved because pymeshlab carries `v_color_matrix`
+            # through the decimation.
+            if verbose:
+                print(
+                    "    note: dropping metallic/roughness — pre-decimation "
+                    "lost the per-vertex mapping. Pass `max_atlas_faces=None` "
+                    "to keep them at the cost of slower xatlas."
+                )
+            metallic = None
+            roughness = None
+        n_in_verts = vertices.shape[0]
+        n_in_faces = faces.shape[0]
+        if verbose:
+            print(f"  after UV-atlas cap: V={n_in_verts:,}  F={n_in_faces:,}")
+
     # xatlas is single-threaded LSCM and gets slow / hangs on very large
     # meshes (>500k faces). Hard-warn if we're past a typical "this
     # might take a while" threshold so the user knows what's going on.
     if verbose and n_in_faces > 200_000:
         print(
-            f"  ⚠  xatlas is single-threaded on {n_in_faces:,} faces — "
-            "this stage can take a few minutes."
+            f"  ⚠  xatlas on {n_in_faces:,} faces — this stage can take a few minutes."
         )
 
     # xatlas.parametrize requires C-contiguous float32 verts + uint32 faces.

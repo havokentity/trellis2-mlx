@@ -49,6 +49,7 @@ def export_glb(
     max_hole_size: int = 30,
     uv_atlas: bool = False,
     texture_size: int = 1024,
+    max_atlas_faces: int = 150_000,
     verbose: bool = False,
 ) -> Path:
     """Author a GLB file at ``out_path``.
@@ -231,6 +232,7 @@ def export_glb(
             vertex_colors_u8 if vertex_colors_u8.shape[0] == current_verts.shape[0]
             else vertex_colors_u8[: current_verts.shape[0]],
             texture_size=texture_size,
+            max_atlas_faces=max_atlas_faces,
             metallic=metallic_np[: current_verts.shape[0]] if metallic_np is not None else None,
             roughness=roughness_np[: current_verts.shape[0]] if roughness_np is not None else None,
             verbose=verbose,
