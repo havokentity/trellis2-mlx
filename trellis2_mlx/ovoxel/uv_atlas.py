@@ -285,8 +285,24 @@ def bake_uv_atlas(
         threshold_pct = math.sqrt(6.0 / max_atlas_faces) * 100
         threshold_pct = max(0.05, min(threshold_pct, 5.0))
         import contextlib
+
         with contextlib.suppress(Exception):
             ms_cap.meshing_decimation_clustering(threshold=ml.PercentageValue(threshold_pct))
+        # Clustering creates a fresh mesh from spatial bins and can
+        # leave many topologically-disconnected fragments (each bin
+        # collapses to a single vertex but face connectivity isn't
+        # rebuilt across bins). Weld at 2× the clustering threshold
+        # so adjacent bin-vertices merge, dramatically dropping the
+        # chart count xatlas has to deal with.
+        weld_threshold_pct = min(threshold_pct * 2.0, 5.0)
+        with contextlib.suppress(Exception):
+            ms_cap.meshing_merge_close_vertices(
+                threshold=ml.PercentageValue(weld_threshold_pct)
+            )
+        with contextlib.suppress(Exception):
+            ms_cap.meshing_remove_duplicate_faces()
+        with contextlib.suppress(Exception):
+            ms_cap.meshing_remove_null_faces()
         mm = ms_cap.current_mesh()
         vertices = np.ascontiguousarray(mm.vertex_matrix(), dtype=np.float32)
         faces = np.ascontiguousarray(mm.face_matrix(), dtype=np.int32)
