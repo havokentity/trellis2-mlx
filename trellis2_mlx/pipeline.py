@@ -588,20 +588,33 @@ class Trellis2ImageTo3DPipeline:
         out_path: str | Path,
         *,
         repair: bool = True,
+        fill_holes: bool = False,
+        target_faces: int | None = None,
+        max_hole_size: int = 30,
+        verbose: bool = False,
     ) -> Path:
         """Write the result mesh to a GLB file. If the result has per-vertex
         colors (from the texture pipeline), they're authored as the GLB's
         vertex-color attribute and show up in any glTF viewer.
 
         ``repair=True`` (default) runs trimesh's normal-fixing pass on each
-        connected component so back-facing triangles flip outward. Pass
-        ``repair=False`` to skip that and emit the raw extractor output."""
+        connected component so back-facing triangles flip outward.
+
+        ``fill_holes=True`` closes small boundary loops via pymeshlab.
+
+        ``target_faces`` (e.g. 5000 for a low-poly export) triggers
+        quadric edge-collapse decimation to that face count. Vertex
+        colors are interpolated through the decimation."""
         return export_glb(
             result.vertices,
             result.faces,
             out_path,
             material_colors=result.vertex_colors,
             repair=repair,
+            fill_holes=fill_holes,
+            target_faces=target_faces,
+            max_hole_size=max_hole_size,
+            verbose=verbose,
         )
 
 

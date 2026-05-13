@@ -23,6 +23,10 @@ def export_glb(
     *,
     material_colors: mx.array | None = None,
     repair: bool = True,
+    fill_holes: bool = False,
+    target_faces: int | None = None,
+    max_hole_size: int = 30,
+    verbose: bool = False,
 ) -> Path:
     """Author a GLB file at ``out_path``.
 
@@ -40,13 +44,20 @@ def export_glb(
     repair : bool
         When True (default), runs ``trimesh.repair.fix_normals(..., multibody=True)``
         before export to flip back-facing triangles and orient face normals
-        outward on each connected component. The Flexible Dual Grid mesh
-        extractor does not guarantee consistent winding, so without this
-        step many viewers show back-facing triangles as holes due to
-        back-face culling. Vertex count, face count, and per-vertex colors
-        are preserved — only the column order within each face row may
-        change. Set to False to keep the raw extractor output (faster, but
-        triangles may appear flipped in renderers that cull back faces).
+        outward on each connected component. Vertex / face counts and
+        per-vertex colors are preserved.
+    fill_holes : bool
+        When True, runs a ``pymeshlab.meshing_close_holes`` pass to close
+        small boundary loops (≤ ``max_hole_size`` edges). Default False.
+    target_faces : int or None
+        When set, runs quadric edge-collapse decimation down to this face
+        count, preserving vertex colors. Use this for a "low-poly" /
+        game-ready export. Default None (keep extractor output).
+    max_hole_size : int
+        Maximum hole perimeter (in edges) to close when ``fill_holes`` is
+        True. Default 30.
+    verbose : bool
+        Print before/after stats during repair / simplification.
 
     Returns
     -------
@@ -61,7 +72,7 @@ def export_glb(
     if faces_np.ndim != 2 or faces_np.shape[1] != 3:
         raise ValueError(f"faces must be [F, 3]; got {faces_np.shape}")
 
-    vertex_colors: np.ndarray | None = None
+    vertex_colors_u8: np.ndarray | None = None
     if material_colors is not None:
         colors_np = np.asarray(material_colors).astype(np.float32)
         if colors_np.shape != verts_np.shape:
@@ -70,7 +81,7 @@ def export_glb(
                 f"got {colors_np.shape} vs {verts_np.shape}"
             )
         # trimesh expects uint8 RGBA per vertex.
-        vertex_colors = np.concatenate(
+        vertex_colors_u8 = np.concatenate(
             [
                 np.clip(colors_np * 255.0, 0, 255).astype(np.uint8),
                 np.full((colors_np.shape[0], 1), 255, dtype=np.uint8),
@@ -81,12 +92,44 @@ def export_glb(
     mesh = trimesh.Trimesh(
         vertices=verts_np,
         faces=faces_np,
-        vertex_colors=vertex_colors,
+        vertex_colors=vertex_colors_u8,
         process=False,
     )
     if repair and faces_np.shape[0] > 0:
         # multibody=True so each disjoint piece (e.g. separate gemstones,
         # filigree wires) gets its own outward-orientation pass.
         trimesh.repair.fix_normals(mesh, multibody=True)  # type: ignore[no-untyped-call]
+
+    vertex_normals: np.ndarray | None = None
+    if (fill_holes or target_faces is not None) and faces_np.shape[0] > 0:
+        # Round-trip through pymeshlab for hole-fill + quadric decimation.
+        from trellis2_mlx.ovoxel.repair import repair_mesh
+
+        # Use the (possibly winding-fixed) mesh as input so pymeshlab
+        # works on the corrected topology.
+        result = repair_mesh(
+            np.asarray(mesh.vertices, dtype=np.float32),
+            np.asarray(mesh.faces, dtype=np.int32),
+            vertex_colors=vertex_colors_u8,
+            fill_holes=fill_holes,
+            max_hole_size=max_hole_size,
+            target_faces=target_faces,
+            compute_vertex_normals=True,
+            verbose=verbose,
+        )
+        mesh = trimesh.Trimesh(
+            vertices=result["vertices"],
+            faces=result["faces"],
+            vertex_colors=result["vertex_colors"],
+            vertex_normals=result["vertex_normals"],
+            process=False,
+        )
+        vertex_normals = result["vertex_normals"]
+
+    if vertex_normals is None and faces_np.shape[0] > 0:
+        # Always author per-vertex smooth normals so renderers shade
+        # the mesh smoothly. trimesh computes these lazily but doesn't
+        # always include them in the GLB unless we touch them.
+        _ = mesh.vertex_normals  # trigger computation
     mesh.export(out)
     return out

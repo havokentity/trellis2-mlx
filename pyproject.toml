@@ -33,6 +33,7 @@ dependencies = [
     "transformers>=4.44.0",
     "einops>=0.8.0",
     "numpy>=1.26.0",
+    "pymeshlab>=2025.7",
 ]
 
 [project.optional-dependencies]
@@ -94,6 +95,7 @@ module = [
     "PIL.*",
     "torch.*",
     "safetensors.*",
+    "pymeshlab.*",
 ]
 ignore_missing_imports = true
 
