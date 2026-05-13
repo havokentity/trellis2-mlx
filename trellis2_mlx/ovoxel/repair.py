@@ -123,7 +123,7 @@ def repair_mesh(
         m = ml.Mesh(vertex_matrix=v64, face_matrix=f32)
     ms.add_mesh(m)
 
-    if fill_holes:
+    def _close_holes() -> None:
         # pymeshlab raises if the mesh has zero boundary loops; swallow
         # that so a clean input passes through unchanged.
         try:
@@ -131,20 +131,16 @@ def repair_mesh(
         except Exception as e:  # noqa: BLE001 — pymeshlab raises generic Exception
             if "boundary" not in str(e).lower() and "hole" not in str(e).lower():
                 raise
-        if verbose:
-            mm = ms.current_mesh()
-            print(f"  after hole-fill: V={mm.vertex_number():,}  F={mm.face_number():,}")
 
-    if target_faces is not None and target_faces > 0:
-        # preservetopology=False is required to actually hit aggressive
-        # face-count targets on TRELLIS.2 output — the FDG mesh extractor
-        # produces lots of non-manifold edges (single-voxel-thick filigree,
-        # interior voids) and with preservetopology=True the decimator
-        # refuses to collapse across them. We sacrifice topological purity
-        # for the requested polycount, matching the upstream cumesh.simplify
-        # behavior.
+    def _decimate(target: int) -> None:
+        """preservetopology=False is required to actually hit aggressive
+        face-count targets on TRELLIS.2 output — the FDG mesh extractor
+        produces lots of non-manifold edges (single-voxel-thick filigree,
+        interior voids) and with preservetopology=True the decimator
+        refuses to collapse across them. We sacrifice topological purity
+        for the requested polycount, matching upstream cumesh.simplify."""
         ms.meshing_decimation_quadric_edge_collapse(
-            targetfacenum=int(target_faces),
+            targetfacenum=int(target),
             preserveboundary=False,
             preservenormal=True,
             preservetopology=False,
@@ -152,9 +148,98 @@ def repair_mesh(
             planarquadric=True,
             qualitythr=0.3,
         )
+
+    def _cleanup(small_component_size: int = 100, small_component_diameter: float = 0.02) -> None:
+        """Standard topology cleanup pass — mirrors upstream cumesh's
+        remove_duplicate_faces + repair_non_manifold_edges +
+        remove_small_connected_components + fill_holes chain
+        (postprocess.py:139-145).
+
+        Drops disconnected islands smaller than ``small_component_size``
+        faces (defaults to 100) OR a diameter less than
+        ``small_component_diameter`` (in unit-cube coordinates; default
+        2% of bbox). Both filters complement each other: the size filter
+        kills triangle confetti, the diameter filter kills small but
+        face-rich blobs sitting in space.
+        """
+        import contextlib
+
+        # Each filter may raise if the mesh is in a state it can't act on
+        # (e.g. no non-manifold edges, no small components). We treat those
+        # as success ("nothing to do") and continue.
+        with contextlib.suppress(Exception):
+            ms.meshing_remove_duplicate_faces()
+        with contextlib.suppress(Exception):
+            ms.meshing_remove_duplicate_vertices()
+        with contextlib.suppress(Exception):
+            ms.meshing_repair_non_manifold_edges()
+        with contextlib.suppress(Exception):
+            ms.meshing_remove_connected_component_by_face_number(
+                mincomponentsize=small_component_size
+            )
+        with contextlib.suppress(Exception):
+            from pymeshlab import PercentageValue
+            ms.meshing_remove_connected_component_by_diameter(
+                mincomponentdiag=PercentageValue(small_component_diameter * 100)
+            )
+        if fill_holes:
+            _close_holes()
+
+    # Step 0: weld near-duplicate vertices. The FDG mesh extractor can emit
+    # vertices that are spatially coincident but indexed separately (one
+    # per voxel rather than one per shared corner). Without welding,
+    # every triangle is its own topological component, decimation can't
+    # collapse across the implicit seams, and trimesh's
+    # `split(only_watertight=False)` sees thousands of "components"
+    # that aren't real. 0.05% of bbox diameter is well under one voxel
+    # at 512³ source resolution so we don't smear real geometry.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        ms.meshing_merge_close_vertices(threshold=ml.PercentageValue(0.05))
+    if verbose:
+        mm = ms.current_mesh()
+        print(f"  after vertex weld: V={mm.vertex_number():,}  F={mm.face_number():,}")
+
+    if fill_holes:
+        _close_holes()
         if verbose:
             mm = ms.current_mesh()
-            print(f"  after simplify:  V={mm.vertex_number():,}  F={mm.face_number():,}")
+            print(f"  after hole-fill: V={mm.vertex_number():,}  F={mm.face_number():,}")
+
+    if target_faces is not None and target_faces > 0:
+        # Multi-stage simplification mirroring the upstream cumesh chain
+        # (postprocess.py:130-160): aggressive 3× pre-pass + cleanup +
+        # final target. This gives the second decimation a clean topology
+        # to work with and avoids the "fragmented fairy dust" output that
+        # a single aggressive pass produces on filigree-rich shapes.
+        pre_target = int(target_faces) * 3
+        if pre_target < ms.current_mesh().face_number():
+            _decimate(pre_target)
+            if verbose:
+                mm = ms.current_mesh()
+                print(
+                    f"  after pre-simplify (3×target):  V={mm.vertex_number():,}  "
+                    f"F={mm.face_number():,}"
+                )
+            _cleanup()
+            if verbose:
+                mm = ms.current_mesh()
+                print(
+                    f"  after cleanup pass 1:  V={mm.vertex_number():,}  F={mm.face_number():,}"
+                )
+        _decimate(int(target_faces))
+        if verbose:
+            mm = ms.current_mesh()
+            print(
+                f"  after final simplify:  V={mm.vertex_number():,}  F={mm.face_number():,}"
+            )
+        _cleanup()
+        if verbose:
+            mm = ms.current_mesh()
+            print(
+                f"  after cleanup pass 2:  V={mm.vertex_number():,}  F={mm.face_number():,}"
+            )
 
     if compute_vertex_normals:
         ms.compute_normal_per_vertex()
