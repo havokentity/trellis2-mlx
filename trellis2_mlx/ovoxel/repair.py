@@ -218,76 +218,78 @@ def repair_mesh(
             print(f"  after hole-fill: V={mm.vertex_number():,}  F={mm.face_number():,}")
 
     if target_faces is not None and target_faces > 0:
-        # Multi-stage simplification mirroring the upstream cumesh chain
-        # (postprocess.py:130-160): aggressive 3× pre-pass + cleanup +
-        # final target. This gives the second decimation a clean topology
-        # to work with and avoids the "fragmented fairy dust" output that
-        # a single aggressive pass produces on filigree-rich shapes.
-        pre_target = int(target_faces) * 3
-        if pre_target < ms.current_mesh().face_number():
-            _decimate(pre_target)
-            if verbose:
-                mm = ms.current_mesh()
-                print(
-                    f"  after pre-simplify (3×target):  V={mm.vertex_number():,}  "
-                    f"F={mm.face_number():,}"
-                )
-            _cleanup()
-            if verbose:
-                mm = ms.current_mesh()
-                print(
-                    f"  after cleanup pass 1:  V={mm.vertex_number():,}  F={mm.face_number():,}"
-                )
-        _decimate(int(target_faces))
-        if verbose:
-            mm = ms.current_mesh()
-            print(
-                f"  after final simplify:  V={mm.vertex_number():,}  F={mm.face_number():,}"
-            )
-        _cleanup()
-        if verbose:
-            mm = ms.current_mesh()
-            print(
-                f"  after cleanup pass 2:  V={mm.vertex_number():,}  F={mm.face_number():,}"
-            )
-
-        # Retry loop: when the polite decimator refuses to hit target
-        # (e.g. on cascade output where cleanup leaves a mesh with too
-        # few collapsible edges), do progressively more aggressive
-        # passes. Each retry feeds a SMALLER `targetfacenum` to the
-        # decimator so it's forced to collapse more edges; pymeshlab
-        # often stops at intermediate sizes if asked for the exact
-        # target. 20% slack — within 1.2× of target, leave it alone.
-        # Cap at 4 attempts (target / 1, /2, /4, /8) to avoid infinite
-        # loops when the mesh genuinely can't be reduced further.
+        # pymeshlab's quadric decimator caps reduction at ~85% per call.
+        # For big reductions (cascade 8.4M → 500k = ~94% needed) we
+        # iterate quadric, asking for the actual target each pass —
+        # the decimator reduces as much as it can per call, and we
+        # call it again. When two consecutive passes don't make
+        # progress we bail out to clustering decimation which
+        # guarantees reduction (spatial vertex binning) at the cost
+        # of coarser output.
+        #
+        # Skipping cleanup BETWEEN passes because cleanup removes
+        # non-manifold edges that the decimator needs to collapse
+        # aggressively. Without that change the user's cascade test
+        # got stuck at 1.4M no matter how many retries we did.
         target = int(target_faces)
-        for attempt in range(4):
+        for attempt in range(5):
             current_count = ms.current_mesh().face_number()
             if current_count <= target * 1.2:
                 break
-            shrunk_target = max(target // (2**attempt), 100)
+            # First pass is polite (preservenormal=True, qualitythr=0.3).
+            # Subsequent passes are aggressive (accept any quality, drop
+            # the normal-preservation constraint).
+            aggressive = attempt > 0
             if verbose:
                 print(
-                    f"  retry {attempt + 1}: aggressive decimation "
-                    f"({current_count:,} → ask for {shrunk_target:,}, "
-                    f"true target {target:,})"
+                    f"  decimate pass {attempt + 1} "
+                    f"({'aggressive' if aggressive else 'polite'}): "
+                    f"{current_count:,} → ask for {target:,}"
                 )
             prev_count = current_count
-            _decimate(shrunk_target, aggressive=True)
+            _decimate(target, aggressive=aggressive)
             new_count = ms.current_mesh().face_number()
-            if new_count >= prev_count:
-                # No progress — decimator is genuinely stuck. Give up.
+            if new_count >= prev_count * 0.98:
+                # < 2% reduction = quadric is effectively stuck. Fall
+                # back to clustering. Threshold heuristic: edge length
+                # of a uniform mesh at the target face count, in % of
+                # bbox diameter. For unit-cube models with surface area
+                # ~6, edge ≈ sqrt(6/N).
+                import math
+
+                threshold_pct = math.sqrt(6.0 / target) * 100
+                threshold_pct = max(0.05, min(threshold_pct, 5.0))
                 if verbose:
                     print(
-                        f"    no progress ({prev_count:,} → {new_count:,}); "
-                        "decimator stuck, accepting current size"
+                        f"    quadric plateau ({prev_count:,} → {new_count:,}); "
+                        f"falling back to clustering decimation "
+                        f"@ {threshold_pct:.2f}% bbox edge"
+                    )
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    ms.meshing_decimation_clustering(
+                        threshold=ml.PercentageValue(threshold_pct)
                     )
                 break
+
+        if verbose:
+            mm = ms.current_mesh()
+            print(
+                f"  after decimate loop:  V={mm.vertex_number():,}  "
+                f"F={mm.face_number():,}"
+            )
+
+        # Cleanup once, AT THE END. Cleanup between decimation passes
+        # was what broke the per-pass reduction: removing dupes /
+        # non-manifold / small-components stripped out exactly the
+        # edges the decimator wanted to collapse next, leaving a mesh
+        # where every face was on a critical edge.
         _cleanup()
         if verbose:
             mm = ms.current_mesh()
             print(
-                f"  after retry+cleanup:  V={mm.vertex_number():,}  "
+                f"  after cleanup:  V={mm.vertex_number():,}  "
                 f"F={mm.face_number():,}"
             )
 
