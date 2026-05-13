@@ -61,20 +61,35 @@ uv run python -m examples.workflows.advanced --mode 1024_cascade
 # Highest detail — 1536_cascade
 uv run python -m examples.workflows.simple --mode 1536_cascade --target-faces 1000000
 
-# Game-ready low-poly (always 512 mode — already fast)
-uv run python -m examples.workflows.low_poly --target-faces 5000
+# Game-ready low-poly with a proper UV-baked 1K texture atlas
+uv run python -m examples.workflows.low_poly --target-faces 5000 \
+    --uv-atlas --texture-size 1024
 
 # Geometry only, fast
 uv run python -m examples.workflows.only_mesh_simple \
     --mode 512 --target-faces 100000
 
-# Your own image
+# Your own image, cascade + UV atlas at 2K
 uv run python -m examples.workflows.advanced \
-    --image path/to/your.png --output ./out.glb --mode 1024_cascade
+    --image path/to/your.png --output ./out.glb \
+    --mode 1024_cascade --uv-atlas --texture-resolution 2048
 
 # See what an unimplemented workflow would need
 uv run python -m examples.workflows.max_quality
 ```
+
+### UV-atlas baking (`--uv-atlas`)
+
+By default the implemented workflows ship per-vertex colors. With
+`--uv-atlas`, the per-vertex colors are baked into a 2D texture atlas
+via `xatlas` (LSCM-style chart unwrap) + a software rasterizer.
+Output GLBs carry a proper `PBRMaterial` with `baseColorTexture` and
+optional `metallicRoughnessTexture` so any glTF viewer / game engine
+samples a real texture rather than interpolating per-vertex colors.
+
+The atlas pass adds 10–60 s depending on `--texture-size` and target
+poly count. For aggressive decimation (e.g. 5k faces) it's almost
+free and dramatically improves visual quality.
 
 Output GLB files default to the repository root with the workflow name
 (e.g. `Simple.glb`, `LowPoly.glb`).

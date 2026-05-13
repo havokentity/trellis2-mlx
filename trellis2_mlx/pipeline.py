@@ -747,6 +747,8 @@ class Trellis2ImageTo3DPipeline:
         fill_holes: bool = False,
         target_faces: int | None = None,
         max_hole_size: int = 30,
+        uv_atlas: bool = False,
+        texture_size: int = 1024,
         verbose: bool = False,
     ) -> Path:
         """Write the result mesh to a GLB file. If the result has per-vertex
@@ -760,16 +762,28 @@ class Trellis2ImageTo3DPipeline:
 
         ``target_faces`` (e.g. 5000 for a low-poly export) triggers
         quadric edge-collapse decimation to that face count. Vertex
-        colors are interpolated through the decimation."""
+        colors are interpolated through the decimation.
+
+        ``uv_atlas=True`` UV-unwraps the mesh with xatlas and bakes the
+        per-vertex colors (and optional metallic/roughness) into a
+        ``texture_size × texture_size`` PBR texture atlas. Use this for
+        engines that prefer texture sampling over vertex-color streams,
+        or any time you decimate aggressively and don't want vertex
+        interpolation to smear the texture.
+        """
         return export_glb(
             result.vertices,
             result.faces,
             out_path,
             material_colors=result.vertex_colors,
+            metallic=result.vertex_metallic,
+            roughness=result.vertex_roughness,
             repair=repair,
             fill_holes=fill_holes,
             target_faces=target_faces,
             max_hole_size=max_hole_size,
+            uv_atlas=uv_atlas,
+            texture_size=texture_size,
             verbose=verbose,
         )
 

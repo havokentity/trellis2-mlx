@@ -34,6 +34,7 @@ dependencies = [
     "einops>=0.8.0",
     "numpy>=1.26.0",
     "pymeshlab>=2025.7",
+    "xatlas>=0.0.10",
 ]
 
 [project.optional-dependencies]
@@ -96,6 +97,7 @@ module = [
     "torch.*",
     "safetensors.*",
     "pymeshlab.*",
+    "xatlas.*",
 ]
 ignore_missing_imports = true
 

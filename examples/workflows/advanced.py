@@ -48,7 +48,11 @@ def main() -> int:
     parser.add_argument("--slat-cfg", type=float, default=6.5)
     parser.add_argument("--target-faces", type=int, default=500_000)
     parser.add_argument("--texture-resolution", type=int, default=2048,
-                        help="UV atlas size (advisory).")
+                        help="UV atlas size when --uv-atlas is set.")
+    parser.add_argument(
+        "--uv-atlas", action="store_true",
+        help="Bake per-vertex colors into a UV-unwrapped 2D texture atlas.",
+    )
     args = parser.parse_args()
 
     pipeline_type = resolve_pipeline_type(args.mode)
@@ -63,11 +67,16 @@ def main() -> int:
         f"{result.vertices.shape[0]:,} verts, {result.faces.shape[0]:,} tris @ {result.output_resolution}³"
     )
 
-    print(f"exporting GLB (fill_holes=True, target_faces={args.target_faces:,}) ...")
+    print(
+        f"exporting GLB (fill_holes=True, target_faces={args.target_faces:,}, "
+        f"uv_atlas={args.uv_atlas}{f' @ {args.texture_resolution}²' if args.uv_atlas else ''}) ..."
+    )
     t0 = time.perf_counter()
     written = pipeline.export_glb(
         result, args.output,
-        repair=True, fill_holes=True, target_faces=args.target_faces, verbose=True,
+        repair=True, fill_holes=True, target_faces=args.target_faces,
+        uv_atlas=args.uv_atlas, texture_size=args.texture_resolution,
+        verbose=True,
     )
     print(f"  export+repair: {time.perf_counter() - t0:.1f} s")
     print(f"wrote GLB: {written}  ({written.stat().st_size / 1024:.1f} KB)")

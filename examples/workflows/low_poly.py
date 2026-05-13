@@ -58,6 +58,15 @@ def main() -> int:
         "--no-texture", action="store_true",
         help="Skip the texture pipeline (geometry only).",
     )
+    parser.add_argument(
+        "--uv-atlas", action="store_true",
+        help="Bake per-vertex colors into a UV-unwrapped 2D texture atlas "
+             "(proper PBR material, much better for downstream engines).",
+    )
+    parser.add_argument(
+        "--texture-size", type=int, default=1024,
+        help="UV atlas size in pixels (default: 1024).",
+    )
     args = parser.parse_args()
 
     image, _ = resolve_image(args.image)
@@ -73,7 +82,8 @@ def main() -> int:
 
     print(
         f"exporting GLB (fill_holes={not args.no_fill_holes}, "
-        f"target_faces={args.target_faces:,}) ..."
+        f"target_faces={args.target_faces:,}, "
+        f"uv_atlas={args.uv_atlas}{f' @ {args.texture_size}²' if args.uv_atlas else ''}) ..."
     )
     t0 = time.perf_counter()
     written = pipeline.export_glb(
@@ -82,6 +92,8 @@ def main() -> int:
         fill_holes=not args.no_fill_holes,
         target_faces=args.target_faces,
         max_hole_size=args.max_hole_size,
+        uv_atlas=args.uv_atlas,
+        texture_size=args.texture_size,
         verbose=True,
     )
     print(f"  export+repair: {time.perf_counter() - t0:.1f} s")
