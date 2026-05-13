@@ -153,11 +153,30 @@ def export_glb(
         # decimation the mesh has far fewer faces so this is fast.
         trimesh.repair.fix_normals(mesh, multibody=True)  # type: ignore[no-untyped-call]
         # fix_normals only changes face winding (column-order within each
-        # face row), not vertex positions or count, so pymeshlab-computed
-        # vertex_normals stay valid — but their direction may be inverted
-        # for faces whose winding flipped. Re-derive on the fly.
-        if vertex_normals is not None:
-            _ = mesh.vertex_normals  # force trimesh recompute from new faces
+        # face row), not vertex positions or count. We need to re-derive
+        # vertex normals from the new face orientation. trimesh's path
+        # uses scipy.sparse which we don't depend on, so compute manually.
+        recomputed = _compute_vertex_normals(
+            np.asarray(mesh.vertices, dtype=np.float32),
+            np.asarray(mesh.faces, dtype=np.int32),
+        )
+        # Re-author the mesh with the corrected normals so trimesh's
+        # GLB export uses them verbatim (and doesn't try to recompute
+        # via the scipy path on its own).
+        repaired_vc: np.ndarray | None = None
+        vis = mesh.visual
+        if vis is not None:
+            vc = getattr(vis, "vertex_colors", None)
+            if vc is not None:
+                repaired_vc = np.asarray(vc)
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(mesh.vertices, dtype=np.float32),
+            faces=np.asarray(mesh.faces, dtype=np.int32),
+            vertex_colors=repaired_vc,
+            vertex_normals=recomputed,
+            process=False,
+        )
+        vertex_normals = recomputed
 
     if vertex_normals is None and faces_np.shape[0] > 0:
         # Always author per-vertex smooth normals so renderers shade
