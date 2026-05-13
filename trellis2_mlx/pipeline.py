@@ -124,10 +124,21 @@ def _load_full_safetensors(path: Path) -> dict[str, np.ndarray]:
 class Trellis2Config:
     """Static configuration for a Trellis2 image-to-3D run.
 
-    Only ``"512"`` is supported today (32³ SLAT → 512³ output). The cascade
-    and 1024 modes need extra wiring (the upsample step in the pipeline +
-    the 1024 SLAT DiT) — they land once we have a working 512 path to
-    compare against.
+    ``pipeline_type`` mirrors the upstream ``Trellis2ImageTo3DPipeline``
+    options:
+
+    * ``"512"`` — single-stage: 32³ SS-DiT → 32³ SLAT DiT → 512³ output.
+    * ``"1024_cascade"`` — two-stage: 32³ SS-DiT → 32³ LR SLAT DiT (512
+      weights) → decoder upsample → 64³ HR SLAT DiT (1024 weights) →
+      1024³ output. Adds the second SLAT-DiT sampling pass + a full
+      pass of the shape decoder used as an "upsample-only" stage.
+    * ``"1536_cascade"`` — same as 1024_cascade but with 96³ HR DiT
+      input → 1536³ output. The same 1024-weight DiT is used at a
+      higher input resolution; positional encodings extrapolate.
+
+    ``"1024"`` (no cascade — direct HR generation) is not yet supported;
+    it needs a 64³ SS-DiT model which we don't have weights for in
+    TRELLIS.2-4B.
     """
 
     pipeline_type: str = "512"
@@ -179,16 +190,28 @@ class Trellis2ImageTo3DPipeline:
 
     def __init__(self, cfg: Trellis2Config | None = None) -> None:
         self.cfg = cfg or Trellis2Config()
-        if self.cfg.pipeline_type != "512":
+        if self.cfg.pipeline_type not in ("512", "1024_cascade", "1536_cascade"):
             raise NotImplementedError(
                 f"pipeline_type={self.cfg.pipeline_type!r} not yet supported; "
-                "only '512' is wired up. 1024 / 1024_cascade / 1536_cascade land next."
+                "valid choices: '512', '1024_cascade', '1536_cascade'."
             )
 
-        # Stage-1 latent grid = 16³; SLAT latent grid = 32³; output = 512³.
+        # Stage-1 latent grid = 16³; LR-SLAT grid = 32³.
         self._ss_latent_res = 16
         self._slat_res = 32
-        self._output_res = 512
+        # Cascade output resolution: 1024 or 1536; non-cascade: 512.
+        # HR DiT input resolution is target_res // 16 (the decoder's 16×
+        # upsample brings us back to target_res).
+        if self.cfg.pipeline_type == "1024_cascade":
+            self._output_res = 1024
+            self._hr_slat_res = 64
+        elif self.cfg.pipeline_type == "1536_cascade":
+            self._output_res = 1536
+            self._hr_slat_res = 96
+        else:
+            self._output_res = 512
+            self._hr_slat_res = self._slat_res  # unused
+        self._is_cascade = self.cfg.pipeline_type != "512"
 
         # Models — instantiated and weight-loaded.
         self._dinov3 = self._load_dinov3()
@@ -196,12 +219,19 @@ class Trellis2ImageTo3DPipeline:
         self._ss_decoder = self._load_ss_decoder()
         self._shape_dit = self._load_shape_dit()
         self._shape_decoder = self._load_shape_decoder()
+        # HR (1024-weight) DiTs only loaded in cascade mode.
+        self._hr_shape_dit: SLatFlowModel | None = None
+        self._hr_tex_dit: SLatFlowModel | None = None
+        if self._is_cascade:
+            self._hr_shape_dit = self._load_hr_shape_dit()
         # Texture-side models are optional.
         self._tex_dit: SLatFlowModel | None = None
         self._material_decoder: MaterialDecoder | None = None
         if self.cfg.with_texture:
             self._tex_dit = self._load_tex_dit()
             self._material_decoder = self._load_material_decoder()
+            if self._is_cascade:
+                self._hr_tex_dit = self._load_hr_tex_dit()
 
         # Sampler is stateless apart from sigma_min.
         self._sampler = RectifiedFlowSampler(sigma_min=1e-5)
@@ -266,6 +296,27 @@ class Trellis2ImageTo3DPipeline:
         path = self.cfg.weights_root / "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors"
         state = _load_full_safetensors(path)
         model = SLatFlowModel(SLatFlowConfig(resolution=self._slat_res, in_channels=64))
+        model.load_weights(slat_flow_model_from_pt_state_dict(state))
+        return model
+
+    def _load_hr_shape_dit(self) -> SLatFlowModel:
+        """HR shape SLAT DiT, trained at coords resolution=64 (for 1024 output).
+        Same weights are reused at resolution=96 for 1536_cascade — positional
+        encodings extrapolate. Per upstream `pipelines/trellis2_image_to_3d.py:567`."""
+        path = self.cfg.weights_root / "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors"
+        state = _load_full_safetensors(path)
+        # The model's positional encoding uses resolution=64 (set in the .json
+        # bundled with the weights); for 1536_cascade we run it at coords up
+        # to 96 (sinusoidal PE extrapolates naturally).
+        model = SLatFlowModel(SLatFlowConfig(resolution=64))
+        model.load_weights(slat_flow_model_from_pt_state_dict(state))
+        return model
+
+    def _load_hr_tex_dit(self) -> SLatFlowModel:
+        """HR texture SLAT DiT, sibling of HR shape DiT but with in_channels=64."""
+        path = self.cfg.weights_root / "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors"
+        state = _load_full_safetensors(path)
+        model = SLatFlowModel(SLatFlowConfig(resolution=64, in_channels=64))
         model.load_weights(slat_flow_model_from_pt_state_dict(state))
         return model
 
@@ -388,6 +439,86 @@ class Trellis2ImageTo3DPipeline:
         slat = slat * self._shape_slat_std + self._shape_slat_mean
         return slat
 
+    def _cascade_upsample_coords(
+        self,
+        lr_slat: mx.array,
+        lr_coords: mx.array,
+        rng: np.random.Generator,
+    ) -> tuple[mx.array, int]:
+        """Cascade step: decode the LR slat just to harvest fine coords, then
+        quantize down to the HR DiT's input resolution.
+
+        Returns ``(hr_coords [L_hr, 3], hr_decoder_input_res)``. The decoder's
+        16× upsample over ``hr_decoder_input_res`` yields the final output
+        resolution (``self._output_res``).
+
+        Per ``trellis2_image_to_3d.py:319-340``: the LR latent is decoded
+        through the shape decoder's 4 upsamples (→ 512³ fine coords), those
+        coords are remapped to the HR DiT's grid via
+        ``(c + 0.5) / 512 * (target_res // 16)`` and uniqued.
+        """
+        del rng  # unused; the upsample is deterministic given the LR latent
+        # Run the shape decoder in upsample-only mode at the LR resolution.
+        fine_coords_lr, lr_output_res = self._shape_decoder.upsample_only(
+            lr_slat, lr_coords, coarse_resolution=self._slat_res
+        )
+        mx.eval(fine_coords_lr)
+        # Quantize fine_coords_lr (at 512³) down to hr_slat_res (64 or 96).
+        # `(coord + 0.5) / 512 * hr_slat_res` — converts the LR-decoded fine
+        # voxel coordinates to the HR DiT's coarser grid coords. Cast to
+        # int via floor.
+        scale = float(self._hr_slat_res) / float(lr_output_res)
+        fine_np = np.asarray(fine_coords_lr).astype(np.float32)
+        quant_np = np.floor((fine_np + 0.5) * scale).astype(np.int32)
+        # Clip to valid range [0, hr_slat_res - 1].
+        quant_np = np.clip(quant_np, 0, self._hr_slat_res - 1)
+        # Unique along rows.
+        unique_np = np.unique(quant_np, axis=0)
+        hr_coords = mx.array(unique_np)
+        return hr_coords, self._hr_slat_res
+
+    def _sample_shape_slat_cascade(
+        self,
+        lr_coords: mx.array,
+        cond: mx.array,
+        neg_cond: mx.array,
+        rng: np.random.Generator,
+    ) -> tuple[mx.array, mx.array]:
+        """Cascade shape SLAT: LR sample → decoder upsample → HR sample.
+
+        Returns ``(hr_slat [L_hr, 32] denormalized, hr_coords [L_hr, 3])``.
+        """
+        if self._hr_shape_dit is None:
+            raise RuntimeError("cascade requested but HR shape DiT not loaded")
+
+        # Step 1: LR sample using the existing 512-trained shape DiT.
+        lr_slat = self._sample_shape_slat(lr_coords, cond, neg_cond, rng)
+        mx.eval(lr_slat)
+        lr_slat = mx.array(np.asarray(lr_slat))  # cut graph
+        mx.clear_cache()
+
+        # Step 2: harvest the HR coords via a decoder upsample-only pass.
+        hr_coords, _ = self._cascade_upsample_coords(lr_slat, lr_coords, rng)
+        mx.eval(hr_coords)
+        mx.clear_cache()
+        del lr_slat  # no longer needed; release the buffer
+
+        # Step 3: HR sample on the new coords using the 1024-trained DiT.
+        n_hr = hr_coords.shape[0]
+        noise = mx.array(rng.standard_normal((n_hr, 32)).astype(np.float32))
+
+        def model_fn(x: mx.array, t_scaled: mx.array, c: mx.array, **kw: Any) -> mx.array:
+            return self._hr_shape_dit(x, kw["coords"], t_scaled, c)
+
+        hr_slat = self._sampler.sample(
+            model_fn, noise,
+            cond=cond, neg_cond=neg_cond,
+            params=_SHAPE_SAMPLER_PARAMS,
+            coords=hr_coords,
+        )
+        hr_slat = hr_slat * self._shape_slat_std + self._shape_slat_mean
+        return hr_slat, hr_coords
+
     def _sample_tex_slat(
         self,
         coords: mx.array,
@@ -395,6 +526,8 @@ class Trellis2ImageTo3DPipeline:
         cond: mx.array,
         neg_cond: mx.array,
         rng: np.random.Generator,
+        *,
+        use_hr_model: bool = False,
     ) -> mx.array:
         """Sample the texture SLAT latent. Output ``[L, 32]`` denormalized.
 
@@ -404,16 +537,24 @@ class Trellis2ImageTo3DPipeline:
         ``trellis2_image_to_3d.py:407-419``. After sampling, we apply the
         *texture* denormalization stats to produce the actual texture
         latent.
+
+        ``use_hr_model=True`` selects the 1024-trained texture DiT (cascade
+        mode); default uses the 512-trained DiT.
         """
-        if self._tex_dit is None:
-            raise RuntimeError("texture pipeline disabled (cfg.with_texture=False)")
+        tex_dit = self._hr_tex_dit if use_hr_model else self._tex_dit
+        if tex_dit is None:
+            raise RuntimeError(
+                "texture pipeline disabled (cfg.with_texture=False)"
+                if not use_hr_model
+                else "cascade requested but HR texture DiT not loaded"
+            )
         n_active = coords.shape[0]
         # Re-normalize shape latent for use as concat_cond.
         shape_slat_norm = (shape_slat_denormalized - self._shape_slat_mean) / self._shape_slat_std
         noise = mx.array(rng.standard_normal((n_active, 32)).astype(np.float32))
 
         def model_fn(x: mx.array, t_scaled: mx.array, c: mx.array, **kw: Any) -> mx.array:
-            return self._tex_dit(x, kw["coords"], t_scaled, c, concat_cond=kw["concat_cond"])
+            return tex_dit(x, kw["coords"], t_scaled, c, concat_cond=kw["concat_cond"])
 
         tex = self._sampler.sample(
             model_fn,
@@ -483,13 +624,24 @@ class Trellis2ImageTo3DPipeline:
                 "the generation collapsed (try a different seed)"
             )
 
-        # 4. Sample shape SLAT
-        print(
-            f"  [4/5] SLAT-shape DiT sampling on {coords.shape[0]} voxels ...",
-            flush=True,
-            file=sys.stderr,
-        )
-        slat = self._sample_shape_slat(coords, cond, neg_cond, rng)
+        # 4. Sample shape SLAT (with cascade branch if requested)
+        if self._is_cascade:
+            print(
+                f"  [4/5] SLAT-shape DiT cascade ({self.cfg.pipeline_type}): "
+                f"LR on {coords.shape[0]} voxels → upsample → HR ...",
+                flush=True,
+                file=sys.stderr,
+            )
+            slat, coords = self._sample_shape_slat_cascade(coords, cond, neg_cond, rng)
+            slat_coarse_resolution = self._hr_slat_res
+        else:
+            print(
+                f"  [4/5] SLAT-shape DiT sampling on {coords.shape[0]} voxels ...",
+                flush=True,
+                file=sys.stderr,
+            )
+            slat = self._sample_shape_slat(coords, cond, neg_cond, rng)
+            slat_coarse_resolution = self._slat_res
         mx.eval(slat)
         # Round-trip slat / coords through numpy so any MLX graph references
         # tied to upstream computations are fully cut before the SC-VAE
@@ -501,11 +653,12 @@ class Trellis2ImageTo3DPipeline:
         # 5. SC-VAE shape decoder
         n_steps = "5/7" if self.cfg.with_texture else "5/5"
         print(
-            f"  [{n_steps}] SC-VAE shape decoder + mesh extraction ...",
+            f"  [{n_steps}] SC-VAE shape decoder + mesh extraction "
+            f"(coarse_res={slat_coarse_resolution}, output_res={slat_coarse_resolution * 16}) ...",
             flush=True,
             file=sys.stderr,
         )
-        ovoxel = self._shape_decoder(slat, coords, coarse_resolution=self._slat_res)
+        ovoxel = self._shape_decoder(slat, coords, coarse_resolution=slat_coarse_resolution)
         mx.eval(ovoxel.coords, ovoxel.v, ovoxel.delta_logits, ovoxel.gamma)
         for sl in ovoxel.subdiv_logits:
             mx.eval(sl)
@@ -533,7 +686,9 @@ class Trellis2ImageTo3DPipeline:
                 flush=True,
                 file=sys.stderr,
             )
-            tex_slat = self._sample_tex_slat(coords, slat, cond, neg_cond, rng)
+            tex_slat = self._sample_tex_slat(
+                coords, slat, cond, neg_cond, rng, use_hr_model=self._is_cascade
+            )
             mx.eval(tex_slat)
             tex_slat = mx.array(np.asarray(tex_slat))  # cut graph
             mx.clear_cache()
@@ -547,7 +702,8 @@ class Trellis2ImageTo3DPipeline:
             # upsamples (matches upstream `decode_tex_slat(..., guide_subs=subs)`).
             guide_subs = [sl > 0 for sl in ovoxel.subdiv_logits]
             mat = self._material_decoder(
-                tex_slat, coords, coarse_resolution=self._slat_res, guide_subs=guide_subs
+                tex_slat, coords, coarse_resolution=slat_coarse_resolution,
+                guide_subs=guide_subs,
             )
             mx.eval(mat.coords, mat.base_color, mat.metallic, mat.roughness, mat.alpha)
             mx.clear_cache()

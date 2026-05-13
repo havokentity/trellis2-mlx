@@ -189,6 +189,25 @@ class ShapeDecoder(nn.Module):
         h = self.output_layer(h)
         return h, coords, resolution, subdiv_logits_per_stage
 
+    def upsample_only(
+        self,
+        latent_feats: mx.array,
+        coords: mx.array,
+        coarse_resolution: int,
+    ) -> tuple[mx.array, int]:
+        """Cascade helper: run the backbone to produce fine-grid coords and
+        discard the dense output. Used by the 1024/1536 cascade pipelines
+        per ``trellis2_image_to_3d.py:323`` — the LR shape latent is decoded
+        once just to harvest the upsampled active set, which the HR DiT
+        then re-generates a fresh latent over.
+
+        Returns ``(fine_coords [L_fine, 3], output_resolution)``.
+        """
+        _, fine_coords, resolution, _ = self._forward_raw(
+            latent_feats, coords, coarse_resolution
+        )
+        return fine_coords, resolution
+
     def __call__(
         self,
         latent_feats: mx.array,

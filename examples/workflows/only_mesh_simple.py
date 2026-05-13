@@ -29,7 +29,7 @@ from examples.workflows._common import (
     add_common_args,
     load_pipeline,
     resolve_image,
-    warn_mode_fallback,
+    resolve_pipeline_type,
 )
 
 
@@ -54,11 +54,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    warn_mode_fallback(args.mode)
+    pipeline_type = resolve_pipeline_type(args.mode)
     image, _ = resolve_image(args.image)
-    pipeline = load_pipeline(args.seed, with_texture=False)
+    pipeline = load_pipeline(args.seed, with_texture=False, pipeline_type=pipeline_type)
 
-    print("running pipeline (mode=512, mesh-only) ...")
+    print(f"running pipeline (mode={pipeline_type}) ...")
     t0 = time.perf_counter()
     result = pipeline.run(image)
     print(

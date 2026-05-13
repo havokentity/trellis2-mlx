@@ -12,7 +12,7 @@ Upstream workflow:
 
 trellis2-mlx implementation:
 
-* Mode=512 fallback (1024_cascade not yet implemented).
+* Mode=1024_cascade NOW supported natively (since trellis2-mlx 0.2).
 * No UV unwrap + rasterizer yet — texture is baked as per-vertex color.
 * The double hole-fill chain (cumesh + meshlib) collapses to a single
   pymeshlab pass.
@@ -31,7 +31,7 @@ from examples.workflows._common import (
     add_common_args,
     load_pipeline,
     resolve_image,
-    warn_mode_fallback,
+    resolve_pipeline_type,
 )
 
 
@@ -51,11 +51,11 @@ def main() -> int:
                         help="UV atlas size (advisory).")
     args = parser.parse_args()
 
-    warn_mode_fallback(args.mode)
+    pipeline_type = resolve_pipeline_type(args.mode)
     image, _ = resolve_image(args.image)
-    pipeline = load_pipeline(args.seed, with_texture=True)
+    pipeline = load_pipeline(args.seed, with_texture=True, pipeline_type=pipeline_type)
 
-    print("running pipeline (mode=512) ...")
+    print(f"running pipeline (mode={pipeline_type}) ...")
     t0 = time.perf_counter()
     result = pipeline.run(image)
     print(

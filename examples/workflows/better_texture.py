@@ -10,7 +10,7 @@ Upstream workflow:
 
 trellis2-mlx implementation:
 
-* Mode=512 fallback (1024 not yet implemented).
+* Mode=1024 falls back to 1024_cascade (same output resolution).
 * Texture is vertex-color baking from the material decoder; the upstream
   4096² texture atlas needs UV-unwrap + rasterizer which are not in
   trellis2-mlx yet. At 500k faces the vertex-color approach is still
@@ -30,7 +30,7 @@ from examples.workflows._common import (
     add_common_args,
     load_pipeline,
     resolve_image,
-    warn_mode_fallback,
+    resolve_pipeline_type,
 )
 
 
@@ -48,15 +48,15 @@ def main() -> int:
                         help="UV-atlas texture size (advisory — vertex-color path used today).")
     args = parser.parse_args()
 
-    warn_mode_fallback(args.mode)
+    pipeline_type = resolve_pipeline_type(args.mode)
     if args.texture_resolution != 4096:
         print(f"  note: --texture-resolution={args.texture_resolution} is advisory "
               "(vertex-color path used today)")
 
     image, _ = resolve_image(args.image)
-    pipeline = load_pipeline(args.seed, with_texture=True)
+    pipeline = load_pipeline(args.seed, with_texture=True, pipeline_type=pipeline_type)
 
-    print("running pipeline (mode=512) ...")
+    print(f"running pipeline (mode={pipeline_type}) ...")
     t0 = time.perf_counter()
     result = pipeline.run(image)
     print(

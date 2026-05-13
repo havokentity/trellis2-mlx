@@ -12,7 +12,7 @@ Upstream workflow defaults (widgets_values from the JSON):
 
 trellis2-mlx implementation:
 
-* Runs at mode=512 (1024_cascade not yet supported — see warning below).
+* Mode=1024_cascade supported natively. mode=1024 falls back to cascade.
 * Texture is baked as per-vertex colors, not UV-unwrap + 2048² texture
   (UnWrap + Rasterizer is not yet implemented). Default poly count is
   500_000 to match upstream's simplify target.
@@ -31,7 +31,7 @@ from examples.workflows._common import (
     add_common_args,
     load_pipeline,
     resolve_image,
-    warn_mode_fallback,
+    resolve_pipeline_type,
 )
 
 
@@ -44,7 +44,7 @@ def main() -> int:
         "--mode",
         default="1024_cascade",
         choices=["512", "1024", "1024_cascade", "1536_cascade"],
-        help="Generator mode (upstream default: 1024_cascade). MLX only supports 512 today.",
+        help="Generator mode (upstream default: 1024_cascade). Cascade modes (1024_cascade, 1536_cascade) now supported.",
     )
     parser.add_argument(
         "--target-faces",
@@ -59,12 +59,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    warn_mode_fallback(args.mode, supported="512")
+    pipeline_type = resolve_pipeline_type(args.mode)
 
     image, _ = resolve_image(args.image)
-    pipeline = load_pipeline(args.seed, with_texture=not args.no_texture)
+    pipeline = load_pipeline(args.seed, with_texture=not args.no_texture, pipeline_type=pipeline_type)
 
-    print("running pipeline (mode=512, simple generator) ...")
+    print(f"running pipeline (mode={pipeline_type}) ...")
     t0 = time.perf_counter()
     result = pipeline.run(image)
     print(

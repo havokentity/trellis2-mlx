@@ -70,26 +70,61 @@ def resolve_image(image_arg: Path | None) -> tuple[Image.Image, Path]:
     return img, image_path
 
 
-def load_pipeline(seed: int, with_texture: bool) -> Trellis2ImageTo3DPipeline:
+SUPPORTED_PIPELINE_TYPES = {"512", "1024_cascade", "1536_cascade"}
+
+
+def load_pipeline(
+    seed: int, with_texture: bool, pipeline_type: str = "512"
+) -> Trellis2ImageTo3DPipeline:
     """Construct the pipeline and report load time."""
     from trellis2_mlx.pipeline import Trellis2Config, Trellis2ImageTo3DPipeline
 
-    print(f"loading pipeline (~20-40 s; texture={'on' if with_texture else 'off'})...")
+    print(
+        f"loading pipeline (~20-60 s; texture={'on' if with_texture else 'off'}, "
+        f"mode={pipeline_type})..."
+    )
     t0 = time.perf_counter()
-    p = Trellis2ImageTo3DPipeline(Trellis2Config(seed=seed, with_texture=with_texture))
+    p = Trellis2ImageTo3DPipeline(
+        Trellis2Config(seed=seed, with_texture=with_texture, pipeline_type=pipeline_type)
+    )
     print(f"  ready in {time.perf_counter() - t0:.1f} s")
     return p
 
 
+def resolve_pipeline_type(requested: str) -> str:
+    """Map a user-facing ``--mode`` argument to a supported pipeline_type.
+
+    Supports ``"512"``, ``"1024_cascade"``, ``"1536_cascade"`` natively. The
+    upstream-only ``"1024"`` mode (no cascade) is not yet supported because
+    we don't have a 64³ SS-DiT model — it falls back to ``"1024_cascade"``
+    with a warning.
+    """
+    if requested in SUPPORTED_PIPELINE_TYPES:
+        return requested
+    if requested == "1024":
+        print()
+        print(f"  ⚠  mode={requested!r} (direct HR, no cascade) is not yet")
+        print("     supported by trellis2-mlx — it needs a 64³ SS-DiT which")
+        print("     isn't in the TRELLIS.2-4B checkpoint. Falling back to")
+        print("     '1024_cascade' (same output resolution).")
+        print()
+        return "1024_cascade"
+    print()
+    print(f"  ⚠  unknown mode={requested!r}, falling back to '512'.")
+    print()
+    return "512"
+
+
 def warn_mode_fallback(requested: str, supported: str = "512") -> None:
-    """Loudly note that the upstream workflow uses a higher-res mode we don't have."""
+    """Backward-compat shim — no longer warns when ``requested`` is now
+    natively supported. Use :func:`resolve_pipeline_type` instead."""
+    if requested in SUPPORTED_PIPELINE_TYPES:
+        return
     if requested == supported:
         return
     print()
-    print(f"  ⚠  upstream workflow defaults to mode={requested!r} but trellis2-mlx")
-    print(f"     currently only supports mode={supported!r}. Running at {supported}.")
-    print("     Higher-res cascade modes are roadmapped — track progress at")
-    print("     https://github.com/havokentity/trellis2-mlx")
+    print(f"  ⚠  upstream workflow uses mode={requested!r} but trellis2-mlx")
+    print(f"     does not support it natively yet — running at {supported}.")
     print()
 
 
@@ -140,10 +175,12 @@ def not_implemented_stub(
 __all__ = [
     "DEFAULT_IMAGE_DIR",
     "REPO_ROOT",
+    "SUPPORTED_PIPELINE_TYPES",
     "add_common_args",
     "load_pipeline",
     "not_implemented_stub",
     "pick_default_image",
     "resolve_image",
+    "resolve_pipeline_type",
     "warn_mode_fallback",
 ]

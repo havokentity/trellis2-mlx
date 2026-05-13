@@ -16,15 +16,15 @@ defaults to the upstream sample image and seed=0.
 
 | Workflow | Script | Status | Notes |
 |---|---|---|---|
-| `Simple.json` | `simple.py` | ✅ runs at 512 fallback | Upstream uses 1024_cascade |
+| `Simple.json` | `simple.py` | ✅ runs all modes | 512 / 1024_cascade / 1536_cascade |
 | `LowPoly.json` | `low_poly.py` | ✅ runs at 512 (native) | Default target_faces=5000 |
-| `Only_Mesh_Simple.json` | `only_mesh_simple.py` | ✅ runs at 512 fallback | Mesh only, no texture |
-| `Only_Mesh_Advanced.json` | `only_mesh_advanced.py` | ✅ runs at 512 fallback | Mesh only, advanced sampler knobs |
-| `Better_Texture.json` | `better_texture.py` | ✅ runs at 512 fallback | Vertex-color texture |
-| `Advanced.json` | `advanced.py` | ✅ runs at 512 fallback | Full advanced sampler |
+| `Only_Mesh_Simple.json` | `only_mesh_simple.py` | ✅ runs all modes | Mesh only |
+| `Only_Mesh_Advanced.json` | `only_mesh_advanced.py` | ✅ runs all modes | Mesh only, advanced sampler knobs |
+| `Better_Texture.json` | `better_texture.py` | ✅ runs all modes | Vertex-color texture |
+| `Advanced.json` | `advanced.py` | ✅ runs all modes | Full advanced sampler |
 | `Using_Qwen_Rembg.json` | `using_qwen_rembg.py` | ✅ utility | Reports alpha stats |
-| `Max_Quality.json` | `max_quality.py` | ⏳ stub | Needs 1536_cascade + MeshRefiner + 4K texture atlas |
-| `High_Quality.json` | `high_quality.py` | ⏳ stub | Needs 1024_cascade + MeshRefiner |
+| `Max_Quality.json` | `max_quality.py` | ⏳ stub | Needs MeshRefiner + 4K texture atlas (1536_cascade now works) |
+| `High_Quality.json` | `high_quality.py` | ⏳ stub | Needs MeshRefiner (1024_cascade now works) |
 | `MeshRefiner.json` | `mesh_refiner.py` | ⏳ stub | Needs MeshRefiner DiT model |
 | `RefineMesh.json` | `refine_mesh.py` | ⏳ stub | Needs MeshRefiner + Trellis2LoadMesh |
 | `RefineMesh_MeshOnly.json` | `refine_mesh_mesh_only.py` | ⏳ stub | Needs MeshRefiner + Trellis2LoadMesh |
@@ -49,23 +49,28 @@ defaults to the upstream sample image and seed=0.
 | `Projection_MultiView_with_Hunyuan3D2.0.json` | `projection_multiview_with_hunyuan3d.py` | ⏳ stub | " |
 
 **Tally:** 7 / 31 workflows runnable today; 24 stubs awaiting model
-ports.
+ports. All cascade modes (`1024_cascade`, `1536_cascade`) now run
+natively on the 7 implemented workflows.
 
 ## Quickstart
 
 ```bash
-# Fully textured mesh, defaults
-uv run python -m examples.workflows.advanced
+# Fully textured mesh at 1024_cascade (3.7× more verts than 512 mode)
+uv run python -m examples.workflows.advanced --mode 1024_cascade
 
-# Game-ready low-poly with a target face count
+# Highest detail — 1536_cascade
+uv run python -m examples.workflows.simple --mode 1536_cascade --target-faces 1000000
+
+# Game-ready low-poly (always 512 mode — already fast)
 uv run python -m examples.workflows.low_poly --target-faces 5000
 
-# Geometry only, faster
-uv run python -m examples.workflows.only_mesh_simple --target-faces 100000
+# Geometry only, fast
+uv run python -m examples.workflows.only_mesh_simple \
+    --mode 512 --target-faces 100000
 
 # Your own image
-uv run python -m examples.workflows.low_poly \
-    --image path/to/your.png --output ./my_lowpoly.glb
+uv run python -m examples.workflows.advanced \
+    --image path/to/your.png --output ./out.glb --mode 1024_cascade
 
 # See what an unimplemented workflow would need
 uv run python -m examples.workflows.max_quality
@@ -73,6 +78,17 @@ uv run python -m examples.workflows.max_quality
 
 Output GLB files default to the repository root with the workflow name
 (e.g. `Simple.glb`, `LowPoly.glb`).
+
+**Wall time (on M4 Max):**
+
+| Mode | Generation | Notes |
+|---|---|---|
+| `512` | ~70 s | Default, ~1.15M raw verts |
+| `1024_cascade` | ~230 s | ~4.3M raw verts (3.7× more) |
+| `1536_cascade` | ~500 s (est.) | ~9-12M raw verts (rough est.) |
+
+Post-processing (`fix_normals` + decimation) adds roughly 1.5×
+generation time at 1024_cascade.
 
 ## What's missing — the porting roadmap
 
