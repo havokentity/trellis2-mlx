@@ -180,6 +180,13 @@ class ShapeDecoder(nn.Module):
                     resolution = fine_resolution
                 else:
                     h = block(h, nt)
+                # Force materialization so MLX can free the previous block's
+                # lazy-graph buffers. Without this the decoder accumulates the
+                # entire 32-block forward in the graph at once — at realistic
+                # active-set sizes (~30K coarse → up to millions fine) that
+                # blows past Metal's 86 GB single-buffer cap.
+                mx.eval(h, coords, nt)
+                mx.clear_cache()
 
         # Final parameter-free LayerNorm + Linear head.
         h = mx.fast.layer_norm(h, weight=None, bias=None, eps=1e-5)

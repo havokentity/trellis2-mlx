@@ -53,14 +53,26 @@ def submconv3(
 
     Notes
     -----
-    Implementation = single implicit GEMM:
+    Implementation = **per-kernel-position accumulation**:
 
     1. Pad ``x`` with a trailing zero row so missing-neighbor index ``L``
        contributes zero.
-    2. Gather: ``gathered = x_padded[remap(N)]`` with ``-1 → L``, producing
-       ``[L, 27, C_in]``.
-    3. Reshape to ``[L, 27 * C_in]`` and matmul with ``W.reshape(27 * C_in, C_out)``.
-    4. Optionally add bias.
+    2. For each kernel position ``k ∈ [0, 27)``: gather rows of ``x_padded``
+       indexed by ``neighbor_table[:, k]``, multiply by ``weight[k]``,
+       accumulate into the running output.
+
+    This is mathematically equivalent to the "Masked Implicit GEMM"
+    formulation (one big matmul against a ``[27 * C_in, C_out]`` weight)
+    but **bounds peak GPU memory** to a single ``[L, max(C_in, C_out)]``
+    tensor per iteration. The fused implicit-GEMM blew past the Metal
+    86 GB single-buffer cap at large ``L`` (~ 1M voxels) and small ``C``
+    in the upsample stages of the SC-VAE decoder, where MLX's matmul
+    appears to allocate intermediate scratch proportional to ``L * 27 *
+    C_in * C_out``. The loop version keeps peak under a few GB.
+
+    The Metal-kernel replacement (``sparse_conv_fwd.metal``) lands at
+    Phase 1 step 5 / 11 — it will fuse the gather and the matmul into
+    a single dispatch with the masked-implicit-GEMM strategy.
     """
     if x.ndim != 2:
         raise ValueError(f"x must be [L, C_in], got shape {tuple(x.shape)}")
@@ -79,21 +91,22 @@ def submconv3(
             f"x.shape[0] ({n_active})"
         )
 
-    # Pad x with a zero row at index L; remap -1 → L so the gather pulls zeros.
+    # Pad x with a zero row at index L; remap -1 → L so each gather pulls zeros.
     pad_idx = mx.array(n_active, dtype=neighbor_table.dtype)
-    nb_remapped = mx.where(neighbor_table < 0, pad_idx, neighbor_table)
     x_padded = mx.concatenate([x, mx.zeros((1, c_in), dtype=x.dtype)], axis=0)
 
-    # Gather: [L * 27, C_in] → [L, 27 * C_in]
-    gathered = mx.take(x_padded, nb_remapped.reshape(-1), axis=0)
-    gathered = gathered.reshape(n_active, 27 * c_in)
-
-    # Implicit GEMM: single matmul against the flattened weight.
-    out = gathered @ weight.reshape(27 * c_in, c_out)
-    if bias is not None:
-        if bias.shape != (c_out,):
-            raise ValueError(f"bias must be shape [{c_out}], got {tuple(bias.shape)}")
-        out = out + bias
+    # Per-kernel-position accumulation. We start with bias (or zeros) so the
+    # output is built up by 27 small matmuls of [L, C_in] @ [C_in, C_out]
+    # rather than one big [L, 27*C_in] @ [27*C_in, C_out].
+    out = (
+        mx.zeros((n_active, c_out), dtype=x.dtype)
+        if bias is None
+        else mx.broadcast_to(bias.astype(x.dtype), (n_active, c_out)).astype(x.dtype)
+    )
+    for k in range(27):
+        col = mx.where(neighbor_table[:, k] < 0, pad_idx, neighbor_table[:, k])
+        gathered = mx.take(x_padded, col, axis=0)  # [L, C_in]
+        out = out + gathered @ weight[k]  # [L, C_out]
     return out
 
 

@@ -222,6 +222,12 @@ class RectifiedFlowSampler:
                 **model_kwargs,
             )
             sample = sample - (t - t_prev) * v
+            # Force materialization of the new sample so the lazy graph for
+            # this step's DiT forward(s) can be freed. Without this, MLX
+            # holds the entire ``steps × CFG_branches`` graph in memory and
+            # blows past the M4 Max ~86 GB Metal buffer ceiling on the
+            # 1.3B-param DiTs at 12 steps × 2 branches.
+            mx.eval(sample)
         return sample
 
 
