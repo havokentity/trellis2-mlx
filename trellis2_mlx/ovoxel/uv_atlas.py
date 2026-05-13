@@ -193,6 +193,8 @@ def bake_uv_atlas(
         ``metallic_roughness`` ``[H, W, 3]`` uint8 BGR texture image (None if
             both ``metallic`` and ``roughness`` are None).
     """
+    import time
+
     import xatlas
 
     if vertices.ndim != 2 or vertices.shape[1] != 3:
@@ -211,10 +213,48 @@ def bake_uv_atlas(
     if verbose:
         print(f"  UV unwrap input: V={n_in_verts:,}  F={n_in_faces:,}")
 
+    # xatlas is single-threaded LSCM and gets slow / hangs on very large
+    # meshes (>500k faces). Hard-warn if we're past a typical "this
+    # might take a while" threshold so the user knows what's going on.
+    if verbose and n_in_faces > 200_000:
+        print(
+            f"  ⚠  xatlas is single-threaded on {n_in_faces:,} faces — "
+            "this stage can take a few minutes."
+        )
+
     # xatlas.parametrize requires C-contiguous float32 verts + uint32 faces.
     verts_in = np.ascontiguousarray(vertices, dtype=np.float32)
     faces_in = np.ascontiguousarray(faces, dtype=np.uint32)
-    vmapping, faces_atlas, uvs = xatlas.parametrize(verts_in, faces_in)
+
+    # Use the Atlas() form so we can configure chart + pack options to
+    # be faster on big meshes. The default `xatlas.parametrize()` helper
+    # uses high-quality defaults (multi-iteration chart growth, brute
+    # force packing search) which are slow at our scale.
+    atlas = xatlas.Atlas()
+    atlas.add_mesh(verts_in, faces_in)
+    chart_options = xatlas.ChartOptions()
+    chart_options.max_iterations = 1
+    chart_options.max_cost = 8.0  # default 2.0; higher = fewer chart splits = faster
+    pack_options = xatlas.PackOptions()
+    pack_options.bruteForce = False
+    pack_options.rotate_charts = False  # ~3-4× faster, slightly worse packing
+    pack_options.rotate_charts_to_axis = False
+    pack_options.padding = 1
+
+    if verbose:
+        print(
+            f"  xatlas: starting parametrize "
+            f"(chart_max_iters={chart_options.max_iterations}, "
+            f"pack_rotate={pack_options.rotate_charts})..."
+        )
+    t0 = time.perf_counter()
+    atlas.generate(chart_options=chart_options, pack_options=pack_options)
+    if verbose:
+        print(f"  xatlas: parametrize done in {time.perf_counter() - t0:.1f} s")
+
+    # Read back the result (single mesh, index 0).
+    vmapping, faces_atlas, uvs = atlas.get_mesh(0)
+    _ = xatlas  # explicit reference so it's not flagged as unused after refactor
     # vmapping: [V', 1] uint32 — atlas vertex idx → original vertex idx
     # faces_atlas: [F, 3] uint32
     # uvs: [V', 2] float32 in [0, 1]
