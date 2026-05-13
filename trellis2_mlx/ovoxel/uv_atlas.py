@@ -307,7 +307,29 @@ def bake_uv_atlas(
             f"pack_rotate={pack_options.rotate_charts})..."
         )
     t0 = time.perf_counter()
-    atlas.generate(chart_options=chart_options, pack_options=pack_options)
+    # xatlas.generate() is a single C++ call with no progress callback —
+    # we run it on a background thread and emit elapsed-time heartbeats
+    # from the main thread every 10 s so the user can see it's actually
+    # working, not hung.
+    import threading
+
+    err: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            atlas.generate(chart_options=chart_options, pack_options=pack_options)
+        except BaseException as e:  # noqa: BLE001
+            err.append(e)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(timeout=10.0)
+        if worker.is_alive() and verbose:
+            elapsed = time.perf_counter() - t0
+            print(f"    xatlas still running... elapsed {elapsed:.0f} s")
+    if err:
+        raise err[0]
     if verbose:
         print(f"  xatlas: parametrize done in {time.perf_counter() - t0:.1f} s")
 
