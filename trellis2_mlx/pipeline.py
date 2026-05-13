@@ -755,6 +755,7 @@ class Trellis2ImageTo3DPipeline:
         max_hole_size: int = 30,
         uv_atlas: bool = False,
         texture_size: int = 1024,
+        smooth_iterations: int = 5,
         verbose: bool = False,
     ) -> Path:
         """Write the result mesh to a GLB file. If the result has per-vertex
@@ -790,6 +791,7 @@ class Trellis2ImageTo3DPipeline:
             max_hole_size=max_hole_size,
             uv_atlas=uv_atlas,
             texture_size=texture_size,
+            smooth_iterations=smooth_iterations,
             verbose=verbose,
         )
 

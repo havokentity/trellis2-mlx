@@ -49,6 +49,7 @@ def repair_mesh(
     fill_holes: bool = True,
     max_hole_size: int = 30,
     target_faces: int | None = None,
+    smooth_iterations: int = 5,
     compute_vertex_normals: bool = True,
     verbose: bool = False,
 ) -> RepairResult:
@@ -291,6 +292,30 @@ def repair_mesh(
             print(
                 f"  after cleanup:  V={mm.vertex_number():,}  "
                 f"F={mm.face_number():,}"
+            )
+
+    # Smoothing pass: quadric edge-collapse on a mesh with lots of
+    # non-manifold edges (which the FDG extractor produces) leaves
+    # visible "spike" artifacts — verts can move in unpredictable
+    # directions when the algorithm can't compute a clean quadric
+    # error across non-manifold boundaries. A few iterations of
+    # Taubin smoothing (a low-pass filter that doesn't shrink the
+    # mesh like pure Laplacian does) round those off while
+    # preserving overall shape. ``smooth_iterations=0`` skips this
+    # for callers who want raw output.
+    if smooth_iterations > 0 and target_faces is not None and target_faces > 0:
+        import contextlib as _cl
+        with _cl.suppress(Exception):
+            ms.apply_coord_taubin_smoothing(
+                lambda_=0.5,
+                mu=-0.53,
+                stepsmoothnum=int(smooth_iterations),
+            )
+        if verbose:
+            mm = ms.current_mesh()
+            print(
+                f"  after Taubin smoothing ({smooth_iterations} iters):  "
+                f"V={mm.vertex_number():,}  F={mm.face_number():,}"
             )
 
     if compute_vertex_normals:

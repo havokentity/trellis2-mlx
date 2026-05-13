@@ -50,6 +50,7 @@ def export_glb(
     uv_atlas: bool = False,
     texture_size: int = 1024,
     max_atlas_faces: int = 150_000,
+    smooth_iterations: int = 5,
     verbose: bool = False,
 ) -> Path:
     """Author a GLB file at ``out_path``.
@@ -132,6 +133,7 @@ def export_glb(
             fill_holes=fill_holes,
             max_hole_size=max_hole_size,
             target_faces=target_faces,
+            smooth_iterations=smooth_iterations,
             compute_vertex_normals=True,
             verbose=verbose,
         )

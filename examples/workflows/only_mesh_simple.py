@@ -52,6 +52,11 @@ def main() -> int:
         default=2_000_000,
         help="Quadric decimation target (upstream default: 2_000_000).",
     )
+    parser.add_argument(
+        "--smooth-iterations", type=int, default=5,
+        help="Taubin smoothing iterations after decimation (default 5; 0 to disable). "
+             "Higher = smoother but more shape erosion.",
+    )
     args = parser.parse_args()
 
     pipeline_type = resolve_pipeline_type(args.mode)
@@ -75,6 +80,7 @@ def main() -> int:
         repair=True,
         fill_holes=True,
         target_faces=args.target_faces,
+        smooth_iterations=args.smooth_iterations,
         verbose=True,
     )
     print(f"  export+repair: {time.perf_counter() - t0:.1f} s")

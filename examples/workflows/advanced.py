@@ -53,6 +53,11 @@ def main() -> int:
         "--uv-atlas", action="store_true",
         help="Bake per-vertex colors into a UV-unwrapped 2D texture atlas.",
     )
+    parser.add_argument(
+        "--smooth-iterations", type=int, default=5,
+        help="Taubin smoothing iterations after decimation (default 5; 0 to disable). "
+             "Higher = smoother but more shape erosion.",
+    )
     args = parser.parse_args()
 
     pipeline_type = resolve_pipeline_type(args.mode)
@@ -75,6 +80,7 @@ def main() -> int:
     written = pipeline.export_glb(
         result, args.output,
         repair=True, fill_holes=True, target_faces=args.target_faces,
+        smooth_iterations=args.smooth_iterations,
         uv_atlas=args.uv_atlas, texture_size=args.texture_resolution,
         verbose=True,
     )

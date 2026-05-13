@@ -57,6 +57,11 @@ def main() -> int:
         action="store_true",
         help="Skip the texture pipeline (geometry only).",
     )
+    parser.add_argument(
+        "--smooth-iterations", type=int, default=5,
+        help="Taubin smoothing iterations after decimation (default 5; 0 to disable). "
+             "Higher = smoother but more shape erosion.",
+    )
     args = parser.parse_args()
 
     pipeline_type = resolve_pipeline_type(args.mode)
@@ -80,6 +85,7 @@ def main() -> int:
         repair=True,
         fill_holes=True,
         target_faces=args.target_faces,
+        smooth_iterations=args.smooth_iterations,
         verbose=True,
     )
     print(f"  export+repair: {time.perf_counter() - t0:.1f} s")

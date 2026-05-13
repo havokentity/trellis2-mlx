@@ -67,6 +67,11 @@ def main() -> int:
         "--texture-size", type=int, default=1024,
         help="UV atlas size in pixels (default: 1024).",
     )
+    parser.add_argument(
+        "--smooth-iterations", type=int, default=5,
+        help="Taubin smoothing iterations after decimation (default 5; 0 to disable). "
+             "Higher = smoother but more shape erosion.",
+    )
     args = parser.parse_args()
 
     image, _ = resolve_image(args.image)
@@ -91,6 +96,7 @@ def main() -> int:
         repair=True,
         fill_holes=not args.no_fill_holes,
         target_faces=args.target_faces,
+        smooth_iterations=args.smooth_iterations,
         max_hole_size=args.max_hole_size,
         uv_atlas=args.uv_atlas,
         texture_size=args.texture_size,
