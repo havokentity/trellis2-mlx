@@ -214,6 +214,44 @@ def bake_uv_atlas(
     if verbose:
         print(f"  UV unwrap input: V={n_in_verts:,}  F={n_in_faces:,}")
 
+    # Pre-xatlas: weld near-duplicate vertices aggressively (1% of bbox
+    # diameter, much larger than repair.py's 0.05%). This merges
+    # spatially-adjacent triangle fragments that the FDG extractor +
+    # clustering decimation leave topologically separate. Without
+    # this, xatlas sees thousands of one-face "components" and
+    # produces an atlas with sub-20% utilisation.
+    import contextlib
+
+    import pymeshlab as ml_weld
+
+    ms_weld = ml_weld.MeshSet()
+    v64_w = np.ascontiguousarray(vertices, dtype=np.float64)
+    f32_w = np.ascontiguousarray(faces, dtype=np.int32)
+    if vertex_colors.shape[1] == 3:
+        cols_w = np.concatenate(
+            [vertex_colors, np.full((n_in_verts, 1), 255, dtype=np.uint8)], axis=1
+        )
+    else:
+        cols_w = vertex_colors.astype(np.uint8)
+    c64_w = np.ascontiguousarray(cols_w, dtype=np.float64) / 255.0
+    ms_weld.add_mesh(
+        ml_weld.Mesh(vertex_matrix=v64_w, face_matrix=f32_w, v_color_matrix=c64_w)
+    )
+    with contextlib.suppress(Exception):
+        ms_weld.meshing_merge_close_vertices(threshold=ml_weld.PercentageValue(1.0))
+    mm_w = ms_weld.current_mesh()
+    vertices = np.ascontiguousarray(mm_w.vertex_matrix(), dtype=np.float32)
+    faces = np.ascontiguousarray(mm_w.face_matrix(), dtype=np.int32)
+    c01_w = mm_w.vertex_color_matrix()
+    vertex_colors = (np.clip(c01_w, 0.0, 1.0) * 255.0).astype(np.uint8)
+    n_in_verts = vertices.shape[0]
+    n_in_faces = faces.shape[0]
+    if verbose:
+        print(
+            f"  pre-xatlas weld @ 1%:    V={n_in_verts:,}  F={n_in_faces:,}",
+            flush=True,
+        )
+
     # xatlas time scales superlinearly with face count and uses limited
     # internal parallelism (~3 cores on M4 Max). To keep UV-atlas runs
     # bounded we auto-cap the input mesh via a clustering decimation
@@ -285,26 +323,30 @@ def bake_uv_atlas(
     verts_in = np.ascontiguousarray(vertices, dtype=np.float32)
     faces_in = np.ascontiguousarray(faces, dtype=np.uint32)
 
-    # Use the Atlas() form so we can configure chart + pack options to
-    # be faster on big meshes. The default `xatlas.parametrize()` helper
-    # uses high-quality defaults (multi-iteration chart growth, brute
-    # force packing search) which are slow at our scale.
+    # Use the Atlas() form so we can configure chart + pack options.
+    # At our input size (post-cap to 150k faces) we can afford the
+    # high-quality defaults that the disabled-for-speed version was
+    # short-changing — packing 50k chart-fragments without rotation
+    # left 80% of the atlas empty. Re-enable proper packing.
     atlas = xatlas.Atlas()
     atlas.add_mesh(verts_in, faces_in)
     chart_options = xatlas.ChartOptions()
     chart_options.max_iterations = 1
-    chart_options.max_cost = 8.0  # default 2.0; higher = fewer chart splits = faster
+    chart_options.max_cost = 2.0  # default — better-quality charts
     pack_options = xatlas.PackOptions()
     pack_options.bruteForce = False
-    pack_options.rotate_charts = False  # ~3-4× faster, slightly worse packing
-    pack_options.rotate_charts_to_axis = False
-    pack_options.padding = 1
+    pack_options.rotate_charts = True  # critical for good utilisation
+    pack_options.rotate_charts_to_axis = True
+    pack_options.padding = 2  # small gap between charts so bilinear doesn't bleed
+    pack_options.resolution = int(texture_size)  # pack at output resolution
 
     if verbose:
         print(
             f"  xatlas: starting parametrize "
             f"(chart_max_iters={chart_options.max_iterations}, "
-            f"pack_rotate={pack_options.rotate_charts})..."
+            f"pack_rotate={pack_options.rotate_charts}, "
+            f"pack_res={pack_options.resolution})...",
+            flush=True,
         )
     t0 = time.perf_counter()
     # xatlas.generate() is a single C++ call with no progress callback —
@@ -327,11 +369,29 @@ def bake_uv_atlas(
         worker.join(timeout=10.0)
         if worker.is_alive() and verbose:
             elapsed = time.perf_counter() - t0
-            print(f"    xatlas still running... elapsed {elapsed:.0f} s")
+            # flush=True is critical: when xatlas holds the GIL most of
+            # the time the interpreter rarely gets a chance to flush
+            # the buffered stdout, so the heartbeat lines never reach
+            # the user's terminal until the C++ call returns.
+            print(
+                f"    xatlas still running... elapsed {elapsed:.0f} s", flush=True
+            )
     if err:
         raise err[0]
     if verbose:
-        print(f"  xatlas: parametrize done in {time.perf_counter() - t0:.1f} s")
+        print(
+            f"  xatlas: parametrize done in {time.perf_counter() - t0:.1f} s",
+            flush=True,
+        )
+        try:
+            util = atlas.utilization
+            if isinstance(util, (list, tuple)):
+                util_pct = util[0] * 100 if util else 0.0
+            else:
+                util_pct = float(util) * 100
+            print(f"  xatlas: atlas utilisation = {util_pct:.1f}%", flush=True)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Read back the result (single mesh, index 0).
     vmapping, faces_atlas, uvs = atlas.get_mesh(0)
