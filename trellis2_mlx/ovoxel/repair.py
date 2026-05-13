@@ -141,9 +141,14 @@ def repair_mesh(
         for the requested polycount, matching upstream cumesh.simplify.
 
         When ``aggressive=True``, drops `preservenormal` and lowers the
-        quality threshold so the decimator will collapse across sharp
-        edges to actually reach the target. Used for retry passes when
-        the polite (preservenormal=True) pass refuses to go lower."""
+        quality threshold so the decimator will accept any collapse
+        regardless of resulting face quality. Used for retry passes
+        when the polite (preservenormal=True, qualitythr=0.3) pass
+        refuses to go lower."""
+        # qualitythr in pymeshlab is the MINIMUM acceptable quality of
+        # the post-collapse triangle — higher = more strict. 0.0 means
+        # "accept any collapse" which is what we want when the polite
+        # pass got stuck. (Previous code had 1.0 which was max-strict.)
         ms.meshing_decimation_quadric_edge_collapse(
             targetfacenum=int(target),
             preserveboundary=False,
@@ -151,7 +156,7 @@ def repair_mesh(
             preservetopology=False,
             optimalplacement=True,
             planarquadric=True,
-            qualitythr=1.0 if aggressive else 0.3,
+            qualitythr=0.0 if aggressive else 0.3,
         )
 
     def _cleanup(small_component_size: int = 100, small_component_diameter: float = 0.02) -> None:
@@ -246,28 +251,45 @@ def repair_mesh(
                 f"  after cleanup pass 2:  V={mm.vertex_number():,}  F={mm.face_number():,}"
             )
 
-        # Retry pass: when the polite decimator refused to hit target
-        # (e.g. on cascade output where cleanup has left a mesh with
-        # too few collapsible edges), do an aggressive pass that drops
-        # preservenormal and pushes qualitythr to 1.0. Without this,
-        # cascade runs with target_faces=500000 end up at 1.4M faces
-        # because the decimator gets stuck at intermediate sizes.
-        # 20% slack — if we're within 1.2× of target, leave it alone.
-        current_count = ms.current_mesh().face_number()
-        if current_count > int(target_faces) * 1.2:
+        # Retry loop: when the polite decimator refuses to hit target
+        # (e.g. on cascade output where cleanup leaves a mesh with too
+        # few collapsible edges), do progressively more aggressive
+        # passes. Each retry feeds a SMALLER `targetfacenum` to the
+        # decimator so it's forced to collapse more edges; pymeshlab
+        # often stops at intermediate sizes if asked for the exact
+        # target. 20% slack — within 1.2× of target, leave it alone.
+        # Cap at 4 attempts (target / 1, /2, /4, /8) to avoid infinite
+        # loops when the mesh genuinely can't be reduced further.
+        target = int(target_faces)
+        for attempt in range(4):
+            current_count = ms.current_mesh().face_number()
+            if current_count <= target * 1.2:
+                break
+            shrunk_target = max(target // (2**attempt), 100)
             if verbose:
                 print(
-                    f"  retry: aggressive decimation "
-                    f"({current_count:,} → target {target_faces:,})"
+                    f"  retry {attempt + 1}: aggressive decimation "
+                    f"({current_count:,} → ask for {shrunk_target:,}, "
+                    f"true target {target:,})"
                 )
-            _decimate(int(target_faces), aggressive=True)
-            _cleanup()
-            if verbose:
-                mm = ms.current_mesh()
-                print(
-                    f"  after retry+cleanup:  V={mm.vertex_number():,}  "
-                    f"F={mm.face_number():,}"
-                )
+            prev_count = current_count
+            _decimate(shrunk_target, aggressive=True)
+            new_count = ms.current_mesh().face_number()
+            if new_count >= prev_count:
+                # No progress — decimator is genuinely stuck. Give up.
+                if verbose:
+                    print(
+                        f"    no progress ({prev_count:,} → {new_count:,}); "
+                        "decimator stuck, accepting current size"
+                    )
+                break
+        _cleanup()
+        if verbose:
+            mm = ms.current_mesh()
+            print(
+                f"  after retry+cleanup:  V={mm.vertex_number():,}  "
+                f"F={mm.face_number():,}"
+            )
 
     if compute_vertex_normals:
         ms.compute_normal_per_vertex()
