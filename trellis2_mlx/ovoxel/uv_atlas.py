@@ -280,29 +280,48 @@ def bake_uv_atlas(
             colors_rgba = vertex_colors.astype(np.uint8)
         c64 = np.ascontiguousarray(colors_rgba, dtype=np.float64) / 255.0
         ms_cap.add_mesh(ml.Mesh(vertex_matrix=v64, face_matrix=f32, v_color_matrix=c64))
-        # Use clustering for guaranteed reduction. Threshold heuristic
-        # matches the fallback path in repair.py.
-        threshold_pct = math.sqrt(6.0 / max_atlas_faces) * 100
-        threshold_pct = max(0.05, min(threshold_pct, 5.0))
+        # Use quadric edge-collapse decimation rather than clustering for
+        # the auto-cap. Clustering bins vertices spatially without
+        # rebuilding face connectivity, producing a mesh with thousands
+        # of topologically-disconnected fragments that xatlas sees as
+        # separate charts — even after welding the chart count stays
+        # high and atlas utilisation suffers. Quadric preserves
+        # connectivity properly. The reduction here (3× max from the
+        # upstream cap of 150k) is well within quadric's ~85% per-call
+        # limit so a single call hits target.
         import contextlib
 
         with contextlib.suppress(Exception):
-            ms_cap.meshing_decimation_clustering(threshold=ml.PercentageValue(threshold_pct))
-        # Clustering creates a fresh mesh from spatial bins and can
-        # leave many topologically-disconnected fragments (each bin
-        # collapses to a single vertex but face connectivity isn't
-        # rebuilt across bins). Weld at 2× the clustering threshold
-        # so adjacent bin-vertices merge, dramatically dropping the
-        # chart count xatlas has to deal with.
-        weld_threshold_pct = min(threshold_pct * 2.0, 5.0)
-        with contextlib.suppress(Exception):
-            ms_cap.meshing_merge_close_vertices(
-                threshold=ml.PercentageValue(weld_threshold_pct)
+            ms_cap.meshing_decimation_quadric_edge_collapse(
+                targetfacenum=int(max_atlas_faces),
+                preserveboundary=False,
+                preservenormal=False,
+                preservetopology=False,
+                optimalplacement=True,
+                planarquadric=True,
+                qualitythr=0.3,
             )
+        # If quadric refused to reduce enough, fall back to clustering +
+        # weld (same heuristic as before — guaranteed reduction at the
+        # cost of fragmentation).
+        if ms_cap.current_mesh().face_number() > int(max_atlas_faces) * 1.5:
+            threshold_pct = math.sqrt(6.0 / max_atlas_faces) * 100
+            threshold_pct = max(0.05, min(threshold_pct, 5.0))
+            with contextlib.suppress(Exception):
+                ms_cap.meshing_decimation_clustering(
+                    threshold=ml.PercentageValue(threshold_pct)
+                )
+            weld_threshold_pct = min(threshold_pct * 2.0, 5.0)
+            with contextlib.suppress(Exception):
+                ms_cap.meshing_merge_close_vertices(
+                    threshold=ml.PercentageValue(weld_threshold_pct)
+                )
         with contextlib.suppress(Exception):
             ms_cap.meshing_remove_duplicate_faces()
         with contextlib.suppress(Exception):
             ms_cap.meshing_remove_null_faces()
+        with contextlib.suppress(Exception):
+            ms_cap.meshing_remove_connected_component_by_face_number(mincomponentsize=10)
         mm = ms_cap.current_mesh()
         vertices = np.ascontiguousarray(mm.vertex_matrix(), dtype=np.float32)
         faces = np.ascontiguousarray(mm.face_matrix(), dtype=np.int32)
