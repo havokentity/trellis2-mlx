@@ -582,15 +582,26 @@ class Trellis2ImageTo3DPipeline:
             vertex_alpha=vertex_alpha,
         )
 
-    def export_glb(self, result: Trellis2ImageTo3DResult, out_path: str | Path) -> Path:
+    def export_glb(
+        self,
+        result: Trellis2ImageTo3DResult,
+        out_path: str | Path,
+        *,
+        repair: bool = True,
+    ) -> Path:
         """Write the result mesh to a GLB file. If the result has per-vertex
         colors (from the texture pipeline), they're authored as the GLB's
-        vertex-color attribute and show up in any glTF viewer."""
+        vertex-color attribute and show up in any glTF viewer.
+
+        ``repair=True`` (default) runs trimesh's normal-fixing pass on each
+        connected component so back-facing triangles flip outward. Pass
+        ``repair=False`` to skip that and emit the raw extractor output."""
         return export_glb(
             result.vertices,
             result.faces,
             out_path,
             material_colors=result.vertex_colors,
+            repair=repair,
         )
 
 

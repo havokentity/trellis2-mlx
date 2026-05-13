@@ -22,6 +22,7 @@ def export_glb(
     out_path: str | Path,
     *,
     material_colors: mx.array | None = None,
+    repair: bool = True,
 ) -> Path:
     """Author a GLB file at ``out_path``.
 
@@ -35,8 +36,17 @@ def export_glb(
         Destination path; ``.glb`` extension expected.
     material_colors : mx.array or None
         Optional ``[V, 3]`` per-vertex base color in linear RGB ``[0, 1]``.
-        When ``None`` (default) the mesh is exported untextured. Material
-        decoder output goes here once that decoder is in.
+        When ``None`` (default) the mesh is exported untextured.
+    repair : bool
+        When True (default), runs ``trimesh.repair.fix_normals(..., multibody=True)``
+        before export to flip back-facing triangles and orient face normals
+        outward on each connected component. The Flexible Dual Grid mesh
+        extractor does not guarantee consistent winding, so without this
+        step many viewers show back-facing triangles as holes due to
+        back-face culling. Vertex count, face count, and per-vertex colors
+        are preserved — only the column order within each face row may
+        change. Set to False to keep the raw extractor output (faster, but
+        triangles may appear flipped in renderers that cull back faces).
 
     Returns
     -------
@@ -74,5 +84,9 @@ def export_glb(
         vertex_colors=vertex_colors,
         process=False,
     )
+    if repair and faces_np.shape[0] > 0:
+        # multibody=True so each disjoint piece (e.g. separate gemstones,
+        # filigree wires) gets its own outward-orientation pass.
+        trimesh.repair.fix_normals(mesh, multibody=True)  # type: ignore[no-untyped-call]
     mesh.export(out)
     return out
