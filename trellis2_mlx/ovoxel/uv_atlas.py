@@ -29,74 +29,134 @@ from __future__ import annotations
 import numpy as np
 
 
-def _rasterize_triangle(
+def _rasterize_batched(
+    uvs_pix: np.ndarray,
+    faces: np.ndarray,
+    attrs: np.ndarray,
     img: np.ndarray,
     mask: np.ndarray,
-    uv0: np.ndarray,
-    uv1: np.ndarray,
-    uv2: np.ndarray,
-    attr0: np.ndarray,
-    attr1: np.ndarray,
-    attr2: np.ndarray,
+    chunk_size: int = 8192,
 ) -> None:
-    """In-place: rasterize one triangle into ``img`` with barycentric attr interp.
+    """Vectorized rasterizer — processes all triangles via numpy fancy indexing.
 
-    ``img`` shape: ``[H, W, C]``.
-    ``uv0/uv1/uv2``: ``[2]`` pixel-space coords (origin top-left, y down).
-    ``attr0/attr1/attr2``: ``[C]`` per-vertex attributes; output is barycentric
-    interpolated.
+    Replaces the per-triangle Python loop. For every triangle we generate
+    its bounding-box pixels into a single flat array, run barycentric
+    interpolation in one batch, mask inside-triangle pixels, and scatter
+    into ``img``.
+
+    Memory: each chunk holds up to ``chunk_size * (max_bbox_pixels)``
+    intermediate pixels. With chart-packed UV atlases, triangles are
+    small (tens of pixels), so the per-chunk working set is bounded.
+
+    Parameters
+    ----------
+    uvs_pix : ``[V, 2]`` float32 pixel-space UV positions.
+    faces : ``[F, 3]`` int32 vertex indices.
+    attrs : ``[V, C]`` per-vertex attributes (uint8 or float).
+    img : ``[H, W, C]`` output image, written in-place.
+    mask : ``[H, W]`` bool coverage mask, written in-place.
+    chunk_size : Max number of triangles to process at once. Lower this
+                 if memory is a concern at very high atlas resolutions.
     """
-    img_h, img_w, _img_c = img.shape
-    # Bounding box (inclusive).
-    x_min = max(0, int(np.floor(min(uv0[0], uv1[0], uv2[0]))))
-    x_max = min(img_w - 1, int(np.ceil(max(uv0[0], uv1[0], uv2[0]))))
-    y_min = max(0, int(np.floor(min(uv0[1], uv1[1], uv2[1]))))
-    y_max = min(img_h - 1, int(np.ceil(max(uv0[1], uv1[1], uv2[1]))))
-    if x_max < x_min or y_max < y_min:
+    img_h, img_w, img_c = img.shape
+    n_faces = faces.shape[0]
+    if n_faces == 0:
         return
 
-    # Pixel centers in the bbox.
-    xs = np.arange(x_min, x_max + 1, dtype=np.float32) + 0.5
-    ys = np.arange(y_min, y_max + 1, dtype=np.float32) + 0.5
-    px, py = np.meshgrid(xs, ys)  # both [Hb, Wb]
+    # Pre-compute everything we need per-triangle.
+    tri_uvs = uvs_pix[faces]  # [F, 3, 2]
+    tri_attrs = attrs[faces].astype(np.float32)  # [F, 3, C]
 
-    # Barycentric coords using the signed-area / sub-triangles formula.
-    # alpha = area(P, v1, v2) / area(v0, v1, v2)
-    # beta  = area(v0, P, v2) / area(...)
-    # gamma = 1 - alpha - beta
-    def edge(ax: float, ay: float, bx: float, by: float, cx: np.ndarray, cy: np.ndarray) -> np.ndarray:
-        return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    # Bbox per triangle, clipped to image.
+    x_min_all = np.clip(np.floor(tri_uvs[:, :, 0].min(axis=1)).astype(np.int32), 0, img_w - 1)
+    x_max_all = np.clip(np.ceil(tri_uvs[:, :, 0].max(axis=1)).astype(np.int32), 0, img_w - 1)
+    y_min_all = np.clip(np.floor(tri_uvs[:, :, 1].min(axis=1)).astype(np.int32), 0, img_h - 1)
+    y_max_all = np.clip(np.ceil(tri_uvs[:, :, 1].max(axis=1)).astype(np.int32), 0, img_h - 1)
+    bbox_w = (x_max_all - x_min_all + 1).clip(min=0)
+    bbox_h = (y_max_all - y_min_all + 1).clip(min=0)
 
-    area = edge(uv0[0], uv0[1], uv1[0], uv1[1], np.array(uv2[0]), np.array(uv2[1]))
-    if abs(float(area)) < 1e-10:
-        return  # degenerate
-    inv_area = 1.0 / float(area)
-
-    w0 = edge(uv1[0], uv1[1], uv2[0], uv2[1], px, py) * inv_area
-    w1 = edge(uv2[0], uv2[1], uv0[0], uv0[1], px, py) * inv_area
-    w2 = 1.0 - w0 - w1
-
-    # Conservative inside test — include edges (with small epsilon for AA-ish).
-    eps = 1e-6
-    inside = (w0 >= -eps) & (w1 >= -eps) & (w2 >= -eps)
-
-    if not inside.any():
-        return
-
-    # Interpolate attributes — [Hb, Wb, C].
-    attr = (
-        w0[..., None] * attr0[None, None, :]
-        + w1[..., None] * attr1[None, None, :]
-        + w2[..., None] * attr2[None, None, :]
+    # Signed area for each triangle.
+    v0 = tri_uvs[:, 0]
+    v1 = tri_uvs[:, 1]
+    v2 = tri_uvs[:, 2]
+    area_all = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - (v1[:, 1] - v0[:, 1]) * (
+        v2[:, 0] - v0[:, 0]
     )
+    nondegen = np.abs(area_all) > 1e-10
 
-    # Write to img. Indexing the slice region is OK — we mask via `inside`.
-    region = img[y_min : y_max + 1, x_min : x_max + 1]
-    mask_region = mask[y_min : y_max + 1, x_min : x_max + 1]
-    # Only write where not already covered, to keep first-write deterministic.
-    write_mask = inside & ~mask_region
-    region[write_mask] = attr[write_mask].astype(region.dtype)
-    mask_region |= inside
+    # Process triangles in chunks to bound memory. Each chunk concatenates
+    # all the per-triangle pixel coordinates into a flat array and
+    # computes barycentric in one big numpy call.
+    eps = 1e-6
+    for start in range(0, n_faces, chunk_size):
+        end = min(start + chunk_size, n_faces)
+        # Filter to non-degenerate triangles with non-empty bbox in this chunk.
+        chunk_idx = np.arange(start, end)
+        valid = nondegen[start:end] & (bbox_w[start:end] > 0) & (bbox_h[start:end] > 0)
+        chunk_idx = chunk_idx[valid]
+        if chunk_idx.size == 0:
+            continue
+
+        x_min = x_min_all[chunk_idx]
+        x_max = x_max_all[chunk_idx]
+        y_min = y_min_all[chunk_idx]
+        y_max = y_max_all[chunk_idx]
+        bw = (x_max - x_min + 1).astype(np.int64)
+        bh = (y_max - y_min + 1).astype(np.int64)
+        n_pix_per_tri = bw * bh  # [N_chunk]
+        total_pix = int(n_pix_per_tri.sum())
+        if total_pix == 0:
+            continue
+
+        # Build flat (px, py, tri_local_idx) arrays via repeat.
+        tri_local_idx = np.repeat(np.arange(chunk_idx.size, dtype=np.int64), n_pix_per_tri)
+        # Per-pixel offset within each triangle's bbox: [0, n_pix_per_tri[i]).
+        offsets = np.arange(total_pix, dtype=np.int64) - np.repeat(
+            np.concatenate([[0], np.cumsum(n_pix_per_tri[:-1])]), n_pix_per_tri
+        )
+        bw_per_pix = bw[tri_local_idx]
+        local_dx = offsets % bw_per_pix
+        local_dy = offsets // bw_per_pix
+        px = x_min[tri_local_idx] + local_dx
+        py = y_min[tri_local_idx] + local_dy
+
+        # Barycentric interp. Pixel centers at +0.5.
+        pf = px.astype(np.float32) + 0.5
+        pyf = py.astype(np.float32) + 0.5
+        tri_real_idx = chunk_idx[tri_local_idx]
+        v0x = v0[tri_real_idx, 0]
+        v0y = v0[tri_real_idx, 1]
+        v1x = v1[tri_real_idx, 0]
+        v1y = v1[tri_real_idx, 1]
+        v2x = v2[tri_real_idx, 0]
+        v2y = v2[tri_real_idx, 1]
+        inv_area = 1.0 / area_all[tri_real_idx]
+        # w0 = area(P, v1, v2) / total_area
+        w0 = ((v1x - pf) * (v2y - pyf) - (v1y - pyf) * (v2x - pf)) * inv_area
+        w1 = ((v2x - pf) * (v0y - pyf) - (v2y - pyf) * (v0x - pf)) * inv_area
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= -eps) & (w1 >= -eps) & (w2 >= -eps)
+        if not inside.any():
+            continue
+
+        # Apply mask. Keep only inside pixels that aren't already covered.
+        not_yet_covered = ~mask[py[inside], px[inside]]
+        inside_idx = np.where(inside)[0]
+        write_idx = inside_idx[not_yet_covered]
+        if write_idx.size == 0:
+            continue
+        wpx = px[write_idx]
+        wpy = py[write_idx]
+        # Barycentric-interpolate attributes for these pixels.
+        a0 = tri_attrs[tri_real_idx[write_idx], 0]
+        a1 = tri_attrs[tri_real_idx[write_idx], 1]
+        a2 = tri_attrs[tri_real_idx[write_idx], 2]
+        col = (
+            w0[write_idx, None] * a0 + w1[write_idx, None] * a1 + w2[write_idx, None] * a2
+        )
+        img[wpy, wpx] = np.clip(col, 0, 255).astype(img.dtype)
+        mask[wpy, wpx] = True
+    _ = img_c  # silence unused-var; img is mutated in place
 
 
 def bake_uv_atlas(
@@ -192,62 +252,32 @@ def bake_uv_atlas(
 
     has_mr = metallic is not None or roughness is not None
     mr_img: np.ndarray | None = None
-    mr_coverage: np.ndarray | None = None
     if has_mr:
         mr_img = np.zeros((tex_h, tex_w, 3), dtype=np.uint8)
-        mr_coverage = np.zeros((tex_h, tex_w), dtype=bool)
 
+    # Batched, vectorized rasterization across ALL triangles. Each chunk
+    # holds up to ``chunk_size`` triangles' bbox pixels and runs the
+    # barycentric test + interp in one big numpy call. This replaces a
+    # per-triangle Python loop that was ~500 µs / triangle and ran into
+    # multi-minute bakes at >100k faces.
     n_faces = faces_atlas.shape[0]
-    log_every = max(1, n_faces // 10)
-    for f_idx in range(n_faces):
-        i0, i1, i2 = faces_atlas[f_idx]
-        _rasterize_triangle(
-            base_color_img,
-            coverage,
-            uvs_pix[i0],
-            uvs_pix[i1],
-            uvs_pix[i2],
-            new_colors[i0],
-            new_colors[i1],
-            new_colors[i2],
-        )
-        if has_mr and mr_img is not None:
-            # glTF MR channel layout: R unused, G=roughness, B=metallic.
-            mr0 = np.array(
-                [
-                    0,
-                    int(new_roughness[i0].item() if new_roughness is not None else 128),
-                    int(new_metallic[i0].item() if new_metallic is not None else 0),
-                ],
-                dtype=np.uint8,
-            )
-            mr1 = np.array(
-                [
-                    0,
-                    int(new_roughness[i1].item() if new_roughness is not None else 128),
-                    int(new_metallic[i1].item() if new_metallic is not None else 0),
-                ],
-                dtype=np.uint8,
-            )
-            mr2 = np.array(
-                [
-                    0,
-                    int(new_roughness[i2].item() if new_roughness is not None else 128),
-                    int(new_metallic[i2].item() if new_metallic is not None else 0),
-                ],
-                dtype=np.uint8,
-            )
-            assert mr_coverage is not None
-            _rasterize_triangle(
-                mr_img, mr_coverage,
-                uvs_pix[i0], uvs_pix[i1], uvs_pix[i2],
-                mr0, mr1, mr2,
-            )
-        if verbose and (f_idx + 1) % log_every == 0:
-            cov_frac = coverage.mean()
-            print(
-                f"    rasterised {f_idx + 1:,}/{n_faces:,} faces  coverage={cov_frac*100:.1f}%"
-            )
+    if verbose:
+        print(f"    rasterising {n_faces:,} triangles (vectorised)...")
+    _rasterize_batched(uvs_pix, faces_atlas, new_colors, base_color_img, coverage)
+
+    if has_mr and mr_img is not None:
+        # glTF metallic-roughness channel layout: R unused, G=roughness, B=metallic.
+        # Build a per-vertex MR attribute array, then rasterize the same way.
+        nv_atlas = new_colors.shape[0]
+        mr_per_vert = np.zeros((nv_atlas, 3), dtype=np.uint8)
+        if new_roughness is not None:
+            mr_per_vert[:, 1] = new_roughness.astype(np.uint8).flatten()
+        else:
+            mr_per_vert[:, 1] = 128
+        if new_metallic is not None:
+            mr_per_vert[:, 2] = new_metallic.astype(np.uint8).flatten()
+        mr_coverage = np.zeros((tex_h, tex_w), dtype=bool)
+        _rasterize_batched(uvs_pix, faces_atlas, mr_per_vert, mr_img, mr_coverage)
 
     # Pad the atlas: any pixel inside a chart that's still uncovered gets the
     # nearest covered pixel's value. This is the standard texture-bleed
